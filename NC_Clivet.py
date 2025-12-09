@@ -44,20 +44,27 @@ SMTP_PASSWORD = "omenkbnewgqmkbmr"       # TODO: sostituisci
 # ============================================================
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
-
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 @st.cache_data(show_spinner=False)
 def load_nc_data() -> pd.DataFrame:
     """Carica tutte le NC dal database in un DataFrame (con tutte le colonne)."""
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM nonconformances", conn)
-    conn.close()
+    try:
+        df = pd.read_sql_query("SELECT * FROM nonconformances", conn)
+    except Exception as e:
+        # Sul Cloud spesso qui è "no such table: nonconformances"
+        st.warning("Database NC vuoto o tabella 'nonconformances' non ancora creata.")
+        print("Errore in load_nc_data:", repr(e))
+        df = pd.DataFrame()
+    finally:
+        conn.close()
 
-    # conversione date (in oggetti date)
-    for col in ["date_opened", "date_closed"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    # conversione date (in oggetti date) solo se ci sono dati
+    if not df.empty:
+        for col in ["date_opened", "date_closed"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
     return df
 
@@ -66,13 +73,20 @@ def load_nc_data() -> pd.DataFrame:
 def load_ac_data() -> pd.DataFrame:
     """Carica tutte le AC dal database in un DataFrame (con tutte le colonne)."""
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM corrective_actions", conn)
-    conn.close()
+    try:
+        df = pd.read_sql_query("SELECT * FROM corrective_actions", conn)
+    except Exception as e:
+        st.warning("Database AC vuoto o tabella 'corrective_actions' non ancora creata.")
+        print("Errore in load_ac_data:", repr(e))
+        df = pd.DataFrame()
+    finally:
+        conn.close()
 
-    # conversione date (in oggetti date)
-    for col in ["ac_date_opened", "ac_date_required", "ac_end_date", "ac_follow_up_date"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    if not df.empty:
+        # conversione date (in oggetti date)
+        for col in ["ac_date_opened", "ac_date_required", "ac_end_date", "ac_follow_up_date"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
     return df
 
