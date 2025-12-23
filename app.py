@@ -22,6 +22,7 @@ try:
 except ImportError:
     genai = None
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or (st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") else None) or (st.secrets.get("gemini", {}).get("api_key") if hasattr(st, "secrets") else None) or ""
 GEMINI_MODEL = "gemini-2.5-flash"
 # ----------------------------
 # DOMAIN CONSTANTS (UI)
