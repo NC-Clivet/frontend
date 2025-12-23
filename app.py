@@ -2125,4 +2125,6 @@ if __name__ == "__main__":
             st.set_page_config(page_title="NC Management", layout="wide")
         except Exception:
             pass
-        st.error("L'app si è int
+        st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace qui in chat.")
+        st.exception(e)
+
