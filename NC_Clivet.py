@@ -23,9 +23,10 @@ try:
 except ImportError:
     genai = None
 
-DATA_URL = st.secrets["google"]["data_script_url"]
-MAIL_URL = st.secrets["google"]["mail_script_url"]
-GEMINI_KEY = st.secrets["gemini"]["api_key"]
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_KEY = st.secrets["gemini"]["api_key"]
+
+
 
 # ============================================================
 # CONFIG
@@ -2003,5 +2004,7 @@ if __name__ == "__main__":
             st.set_page_config(page_title="NC Management", layout="wide")
         except Exception:
             pass
+        st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace qui in chat.")
+        st.exception(e)
         st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace qui in chat.")
         st.exception(e)
