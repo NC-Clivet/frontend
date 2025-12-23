@@ -1,9 +1,13 @@
+
 import re
-import sqlite3
+
 from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
+import requests
+import json
+import streamlit.components.v1 as components
 import altair as alt
 
 import smtplib
@@ -20,8 +24,7 @@ except ImportError:
     genai = None
 
 GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_KEY = "AIzaSyDC9sm2ul7gBmsg010PWtFcZNbRjVif6oQ"
-
+GEMINI_API_KEY = st.secrets["gemini"]["api_key"]
 
 
 
@@ -29,71 +32,519 @@ GEMINI_API_KEY = "AIzaSyDC9sm2ul7gBmsg010PWtFcZNbRjVif6oQ"
 # CONFIG
 # ============================================================
 
-DB_PATH = r"P:\QA\007 Validazione Prodotti\11 Non conformità\nc_system.db"
+DB_PATH = ""  # (non usato: backend Google Sheets)
 TREND_PATH = r"P:\QA\007 Validazione Prodotti\11 Non conformità\Trend _NC Quality_.xlsx"
 
 # Email / SMTP - DA PERSONALIZZARE
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USER = "nc.clivet@gmail.com"   # TODO: sostituisci
-SMTP_PASSWORD = "omenkbnewgqmkbmr"       # TODO: sostituisci
+SMTP_SERVER = os.getenv("SMTP_SERVER") or (st.secrets.get("mail", {}).get("smtp_server") if hasattr(st, "secrets") else None) or ""
+SMTP_PORT = int(os.getenv("SMTP_PORT") or (st.secrets.get("mail", {}).get("smtp_port") if hasattr(st, "secrets") else 0) or 0)
+SMTP_USER = os.getenv("SMTP_USER") or (st.secrets.get("mail", {}).get("username") if hasattr(st, "secrets") else None) or ""
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") or (st.secrets.get("mail", {}).get("password") if hasattr(st, "secrets") else None) or ""
 
 
 # ============================================================
 # DB HELPERS
 # ============================================================
 
-def get_connection():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+def _script_url_data() -> str:
+    """URL WebApp Apps Script per operazioni dati (list/create/update).
+
+    Chiavi supportate in secrets.toml:
+      [google] data_script_url = "..."   (consigliato)
+      [google] script_url = "..."        (fallback)
+      SCRIPT_URL = "..."                 (fallback)
+    """
+    if "google" in st.secrets and "data_script_url" in st.secrets["google"]:
+        return str(st.secrets["google"]["data_script_url"]).split("?")[0]
+    if "google" in st.secrets and "script_url" in st.secrets["google"]:
+        return str(st.secrets["google"]["script_url"]).split("?")[0]
+    if "SCRIPT_URL" in st.secrets:
+        return str(st.secrets["SCRIPT_URL"]).split("?")[0]
+    raise RuntimeError("URL dati non configurato in .streamlit/secrets.toml")
+
+
+def _script_url_mail() -> str:
+    """URL WebApp Apps Script per invio mail come utente Workspace (iframe/browser).
+
+    Chiavi supportate in secrets.toml:
+      [google] mail_script_url = "..."   (consigliato)
+      [google] script_url = "..."        (fallback)
+      (se non presente, usa l'URL dati)
+    """
+    if "google" in st.secrets and "mail_script_url" in st.secrets["google"]:
+        return str(st.secrets["google"]["mail_script_url"]).split("?")[0]
+    if "google" in st.secrets and "script_url" in st.secrets["google"]:
+        return str(st.secrets["google"]["script_url"]).split("?")[0]
+    # fallback: usa quello dati
+    return _script_url_data().split("?")[0]
+
+def send_mail_via_hidden_iframe(script_url: str, payload: dict, key: str = "sendmail"):
+    payload_json = json.dumps(payload, ensure_ascii=False)
+
+    payload_js = json.dumps(payload_json).replace("</", "<\\/")
+
+    # Base64 UTF-8 (btoa non gestisce unicode -> uso encodeURIComponent trick)
+    html = f"""
+<div id="{key}_wrap"></div>
+<iframe name="{key}_frame" style="display:none;"></iframe>
+
+<form id="{key}_form" action="{script_url}" method="POST" target="{key}_frame">
+  <input type="hidden" name="op" value="send_mail" />
+  <input type="hidden" name="mode" value="iframe" />
+  <input type="hidden" name="payload_b64" id="{key}_payload_b64" value="" />
+</form>
+
+<script>
+(function() {{
+  const payload = {payload_js}; // string JSON
+  function toB64Unicode(str) {{
+    return btoa(unescape(encodeURIComponent(str)));
+  }}
+
+  // UI feedback (solo dentro questo component)
+  const wrap = document.getElementById("{key}_wrap");
+  wrap.innerHTML = '<div style="padding:6px 0;">📨 Invio email in corso...</div>';
+
+  // Listener per risposta Apps Script
+  function onMsg(ev) {{
+    try {{
+      const d = ev.data;
+      if (!d || (typeof d !== 'object')) return;
+      if (d.ok) {{
+        wrap.innerHTML = '<div style="padding:6px 0; color:green;">✅ Email inviata.</div>';
+      }} else {{
+        wrap.innerHTML = '<div style="padding:6px 0; color:red;">❌ Errore invio email: ' + (d.error || 'sconosciuto') + '</div>';
+      }}
+    }} catch(e) {{}}
+    window.removeEventListener("message", onMsg);
+  }}
+  window.addEventListener("message", onMsg);
+
+  // Set payload e submit
+  document.getElementById("{key}_payload_b64").value = toB64Unicode(payload);
+  document.getElementById("{key}_form").submit();
+}})();
+</script>
+"""
+    components.html(html, height=60)
+
+def _json_safe(v):
+    """Rende serializzabili in JSON date/datetime e NaN."""
+    try:
+        import pandas as _pd
+        if _pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    if isinstance(v, (date, datetime)):
+        return v.isoformat()
+    return v
+
+
+
+def _dedup_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Coalesce duplicate column names safely (no .loc with duplicate labels).
+
+    For each duplicated name, keeps ONE column with that name and fills its values
+    by taking the first non-empty/non-null value from the duplicates (left->right).
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    cols_list = list(out.columns)
+
+    # Fast exit
+    if len(set(cols_list)) == len(cols_list):
+        return out
+
+    # Find duplicates by name
+    seen = {}
+    for i, name in enumerate(cols_list):
+        seen.setdefault(name, []).append(i)
+
+    # Only names with >1 occurrence
+    dup_names = [n for n, idxs in seen.items() if len(idxs) > 1]
+
+    for name in dup_names:
+        idxs = seen[name]
+        # Safety guard: if something is horribly wrong, don't explode memory
+        if len(idxs) > 50:
+            # keep first occurrence only
+            keep = idxs[0]
+            drop = idxs[1:]
+            out = out.drop(out.columns[drop], axis=1)
+            cols_list = list(out.columns)
+            continue
+
+        block = out.iloc[:, idxs]  # safe: integer positions
+
+        # Start with first column
+        coalesced = block.iloc[:, 0].copy()
+
+        for j in range(1, block.shape[1]):
+            s = block.iloc[:, j]
+            # fill where coalesced is null or empty-string after strip
+            m = coalesced.isna()
+            try:
+                m = m | (coalesced.astype(str).str.strip() == "")
+            except Exception:
+                pass
+            coalesced = coalesced.where(~m, s)
+
+        # Drop all duplicated columns, then insert merged one at the first position
+        first_pos = idxs[0]
+        out = out.drop(out.columns[idxs], axis=1)
+        out.insert(first_pos, name, coalesced)
+
+        # Refresh for next iteration
+        cols_list = list(out.columns)
+        seen = {}
+        for i, nm in enumerate(cols_list):
+            seen.setdefault(nm, []).append(i)
+
+    return out
+
+
+def _api_get(op: str, **params):
+    url = _script_url_data()
+    r = requests.get(url, params={"op": op, **params}, timeout=(5, 30), headers={"Accept":"application/json"})
+    r.raise_for_status()
+    try:
+        j = r.json()
+    except Exception:
+        snippet = (r.text or "").strip()[:800]
+        raise RuntimeError(
+            "Risposta non-JSON dalla WebApp. Probabile redirect/login o deploy non corretto. "
+            "Apri l'URL della WebApp nel browser con account clivet.it e verifica che l'app sia pubblicata "
+            "come 'Web app' con accesso 'Only users in your domain'."
+            f"Snippet risposta: {snippet}"
+        )
+    if not j.get("ok"):
+        raise RuntimeError(j.get("error", "API error"))
+    return j.get("data")
+
+
+def _api_post(op: str, **body):
+    url = _script_url_data()
+    payload = {"op": op}
+    payload.update(body)
+    r = requests.post(url, json=payload, timeout=(5, 60), headers={"Accept":"application/json"})
+    r.raise_for_status()
+    try:
+        j = r.json()
+    except Exception:
+        snippet = (r.text or "").strip()[:800]
+        raise RuntimeError(
+            "Risposta non-JSON dalla WebApp (POST). Probabile redirect/login o deploy non corretto. "
+            "Apri l'URL della WebApp nel browser con account clivet.it e verifica che l'app sia pubblicata "
+            "come 'Web app' con accesso 'Only users in your domain'."
+            f"Snippet risposta: {snippet}"
+        )
+    if not j.get("ok"):
+        raise RuntimeError(j.get("error", "API error"))
+    return j.get("data")
+
 
 @st.cache_data(show_spinner=False)
 def load_nc_data() -> pd.DataFrame:
-    """Carica tutte le NC dal database in un DataFrame (con tutte le colonne)."""
-    conn = get_connection()
-    try:
-        df = pd.read_sql_query("SELECT * FROM nonconformances", conn)
-    except Exception as e:
-        # Sul Cloud spesso qui è "no such table: nonconformances"
-        st.warning("Database NC vuoto o tabella 'nonconformances' non ancora creata.")
-        print("Errore in load_nc_data:", repr(e))
-        df = pd.DataFrame()
-    finally:
-        conn.close()
+    """Carica tutte le NC dal Google Sheet (tab NC) via Apps Script."""
+    data = _api_get("list_nc") or []
+    df = pd.DataFrame(data)
 
-    # conversione date (in oggetti date) solo se ci sono dati
-    if not df.empty:
-        for col in ["date_opened", "date_closed"]:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    if df.empty:
+        return df
+
+    # --- Pulizia nomi colonna (export Oracle spesso contiene spazi/NBSP e duplicati) ---
+    def _clean_col(c: str) -> str:
+        c = str(c or "")
+        c = c.replace("\u00a0", " ").replace("\xa0", " ")
+        c = c.strip()
+        c = re.sub(r"\s+", " ", c)
+        return c
+
+    df.columns = [_clean_col(c) for c in df.columns]
+    df = _dedup_columns(df)
+
+    # Normalizzazione header: se nel foglio arrivano colonne Oracle (es. NONCONFORMANCE_NUMBER, AC_...)
+    # le riportiamo allo schema interno usato dall'app (snake_case).
+    oracle_nc_map = {
+        "NONCONFORMANCE_NUMBER": "nonconformance_number",
+        "NONCONFORMANCE_STATUS": "nonconformance_status",
+        "DATE_OPENED": "date_opened",
+        "DATE_CLOSED": "date_closed",
+        "OWNER": "owner",
+        "RESPONSIBILITY": "responsibility",
+        "PIATTAFORMA": "piattaforma",
+        "PIATT.": "piattaforma",
+        "SHORT_DESCRIPTION": "short_description",
+        "DETAILED_DESCRIPTION": "detailed_description",
+        "NC_PARENT_REF": "nc_parent_ref",
+    }
+    oracle_ac_map = {
+        "AC_CORRECTIVE_ACTION_NUM": "ac_corrective_action_num",
+        "AC_REQUEST_STATUS": "ac_request_status",
+        "AC_REQUEST_PRIORITY": "ac_request_priority",
+        "AC_DATE_OPENED": "ac_date_opened",
+        "AC_DATE_REQUIRED": "ac_date_required",
+        "AC_END_DATE": "ac_end_date",
+        "AC_FOLLOW_UP_DATE": "ac_follow_up_date",
+        "AC_OWNER": "ac_owner",
+        "AC_EMAIL_ADDRESS": "ac_email_address",
+        "AC_SHORT_DESCRIPTION": "ac_short_description",
+        "AC_DETAILED_DESCRIPTION": "ac_detailed_description",
+    }
+
+    # rename solo le colonne presenti
+    ren = {k: v for k, v in {**oracle_nc_map, **oracle_ac_map}.items() if k in df.columns}
+    if ren:
+        df = df.rename(columns=ren)
+
+    # Se non c'è 'id' ma c'è nonconformance_number, usalo come id (alfanumerico)
+    if "id" not in df.columns and "nonconformance_number" in df.columns:
+        df["id"] = df["nonconformance_number"].astype(str).str.strip()
+
+    # Coalesce eventuali colonne duplicate (tipico export Oracle con campi ripetuti)
+    df = _dedup_columns(df)
+
+    # conversione date (in oggetti date)
+    for col in ["date_opened", "date_closed", "created_at", "updated_at"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    # id come stringa (alfanumerico da Oracle)
+    if "id" in df.columns:
+        df["id"] = df["id"].astype(str).str.strip()
 
     return df
 
 
 @st.cache_data(show_spinner=False)
 def load_ac_data() -> pd.DataFrame:
-    """Carica tutte le AC dal database in un DataFrame (con tutte le colonne)."""
-    conn = get_connection()
-    try:
-        df = pd.read_sql_query("SELECT * FROM corrective_actions", conn)
-    except Exception as e:
-        st.warning("Database AC vuoto o tabella 'corrective_actions' non ancora creata.")
-        print("Errore in load_ac_data:", repr(e))
-        df = pd.DataFrame()
-    finally:
-        conn.close()
+    """Carica tutte le AC dal Google Sheet (tab AC) via Apps Script."""
+    data = _api_get("list_ac") or []
+    df = pd.DataFrame(data)
 
-    if not df.empty:
-        # conversione date (in oggetti date)
-        for col in ["ac_date_opened", "ac_date_required", "ac_end_date", "ac_follow_up_date"]:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    if df.empty:
+        # garantisce colonne minime per evitare KeyError nelle view
+        return pd.DataFrame(columns=["id", "nc_id"])
+
+    # --- Pulizia nomi colonna (spazi/NBSP ecc.) ---
+    def _clean_col(c: str) -> str:
+        c = str(c or "")
+        c = c.replace("\u00a0", " ").replace("\xa0", " ")
+        c = c.strip()
+        c = re.sub(r"\s+", " ", c)
+        return c
+
+    df.columns = [_clean_col(c) for c in df.columns]
+    df = _dedup_columns(df)
+
+    # Normalizzazione header Oracle (se tab AC contiene colonne in MAIUSCOLO)
+    oracle_ac_map = {
+        "ID": "id",
+        "NC_ID": "nc_id",
+        "AC_CORRECTIVE_ACTION_NUM": "ac_corrective_action_num",
+        "AC_REQUEST_STATUS": "ac_request_status",
+        "AC_REQUEST_PRIORITY": "ac_request_priority",
+        "AC_DATE_OPENED": "ac_date_opened",
+        "AC_DATE_REQUIRED": "ac_date_required",
+        "AC_END_DATE": "ac_end_date",
+        "AC_FOLLOW_UP_DATE": "ac_follow_up_date",
+        "AC_OWNER": "ac_owner",
+        "AC_EMAIL_ADDRESS": "ac_email_address",
+        "AC_SHORT_DESCRIPTION": "ac_short_description",
+        "AC_DETAILED_DESCRIPTION": "ac_detailed_description",
+    }
+    ren = {k: v for k, v in oracle_ac_map.items() if k in df.columns}
+    if ren:
+        df = df.rename(columns=ren)
+
+    for col in ["ac_date_opened", "ac_date_required", "ac_end_date", "ac_follow_up_date", "created_at", "updated_at"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+    if "id" in df.columns:
+        df["id"] = df["id"].astype(str).str.strip()
+    if "nc_id" in df.columns:
+        df["nc_id"] = df["nc_id"].astype(str).str.strip()
 
     return df
+
+
+
+def _split_combined_nc_ac(df_nc: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Export Oracle "wide": NC + campi AC nella stessa tabella (NC ripetuta su più righe).
+    Se la tab AC è vuota, qui separiamo:
+      - df_nc_unique: 1 riga per NC
+      - df_ac: 1 riga per AC, collegata con nc_id = nonconformance_number (oppure id)
+    NOTE: questa funzione è "memory safe" e non fa merge.
+    """
+    if df_nc is None or df_nc.empty:
+        return df_nc, pd.DataFrame()
+
+    # chiave NC robusta (Oracle)
+    key_nc = "nonconformance_number" if "nonconformance_number" in df_nc.columns else ("id" if "id" in df_nc.columns else None)
+    if key_nc is None:
+        return df_nc.drop_duplicates().copy(), pd.DataFrame()
+
+    # se esiste nonconformance_number, rendiamo id coerente (utile per tutto il resto dell'app)
+    if key_nc == "nonconformance_number":
+        df_nc["nonconformance_number"] = df_nc["nonconformance_number"].astype(str).str.strip()
+        df_nc["id"] = df_nc["nonconformance_number"]
+
+    ac_cols = [c for c in df_nc.columns if str(c).startswith("ac_")]
+    if not ac_cols:
+        return df_nc.drop_duplicates(subset=[key_nc]).copy(), pd.DataFrame()
+
+    # NC unica
+    df_nc_unique = df_nc.drop_duplicates(subset=[key_nc], keep="first").copy()
+
+    # AC: prendiamo solo righe con ac_corrective_action_num valorizzato
+    if "ac_corrective_action_num" not in df_nc.columns:
+        return df_nc_unique, pd.DataFrame()
+
+    ser_acnum = df_nc["ac_corrective_action_num"].astype(str).str.strip()
+    ac_mask = ser_acnum.ne("") & df_nc["ac_corrective_action_num"].notna()
+
+    # Costruisci df_ac prendendo la CHIAVE NC riga-per-riga (NON id fisso)
+    df_ac = df_nc.loc[ac_mask, [key_nc] + ac_cols].copy()
+    df_ac.rename(columns={key_nc: "nc_id"}, inplace=True)
+
+    # id AC = numero azione correttiva (alfanumerico)
+    df_ac["id"] = df_ac["ac_corrective_action_num"].astype(str).str.strip()
+    df_ac["nc_id"] = df_ac["nc_id"].astype(str).str.strip()
+
+    # normalizza date AC se presenti
+    for col in ["ac_date_opened", "ac_date_required", "ac_end_date", "ac_follow_up_date", "created_at", "updated_at"]:
+        if col in df_ac.columns:
+            df_ac[col] = pd.to_datetime(df_ac[col], errors="coerce").dt.date
+
+    # Dedup AC per id (se Oracle ripete righe identiche)
+    df_ac = df_ac.drop_duplicates(subset=["id"], keep="first").copy()
+
+    return df_nc_unique, df_ac
 
 
 def clear_caches():
     load_nc_data.clear()
     load_ac_data.clear()
+    load_platforms.clear()
+
+
+def _serialize_dict(d: dict) -> dict:
+    return {k: _json_safe(v) for k, v in (d or {}).items()}
+
+
+def insert_nc_in_db(values: dict) -> str:
+    payload = {
+        "NONCONFORMANCE_NUMBER": values.get("nonconformance_number",""),
+        "NONCONFORMANCE_STATUS": values.get("nonconformance_status",""),
+        "NC_PARENT_REF": values.get("nc_parent_ref",""),
+        "DATE_OPENED": values.get("date_opened",""),
+        "DATE_CLOSED": values.get("date_closed",""),
+        "PIATTAFORMA": values.get("piattaforma",""),
+        "SHORT_DESCRIPTION": values.get("short_description",""),
+        "DETAILED_DESCRIPTION": values.get("detailed_description",""),
+        "OWNER": values.get("owner",""),
+        "RESPONSIBILITY": values.get("responsibility",""),
+    }
+    out = _api_post("create_nc_wide", payload=_serialize_dict(payload))
+    clear_caches()
+    return str(out.get("id","")) if isinstance(out, dict) else ""
+
+def update_nc_in_db(nc_id: str, values: dict):
+    patch = {
+        "NONCONFORMANCE_STATUS": values.get("nonconformance_status",""),
+        "NC_PARENT_REF": values.get("nc_parent_ref",""),
+        "DATE_OPENED": values.get("date_opened",""),
+        "DATE_CLOSED": values.get("date_closed",""),
+        "PIATTAFORMA": values.get("piattaforma",""),
+        "SHORT_DESCRIPTION": values.get("short_description",""),
+        "DETAILED_DESCRIPTION": values.get("detailed_description",""),
+        "OWNER": values.get("owner",""),
+        "RESPONSIBILITY": values.get("responsibility",""),
+    }
+    _api_post("update_nc_wide", nc_number=str(nc_id), patch=_serialize_dict(patch))
+    clear_caches()
+
+
+def insert_ac_in_db(nc_id: str, values: dict):
+    payload = {"nc_id": str(nc_id)}
+    payload.update(values or {})
+    _api_post("create_ac", payload=_serialize_dict(payload))
+    clear_caches()
+
+
+def update_ac_in_db(nc_id: str, ac_id: str, values: dict):
+    """Aggiorna una AC *nel foglio NC wide* (NC e AC nello stesso tab).
+
+    Richiede che la WebApp Apps Script supporti l'operazione POST:
+      op="update_ac_wide"
+      { nc_number: <NC>, ac_id: <AC>, patch: {...} }
+
+    In assenza dell'endpoint, viene sollevato un errore esplicativo.
+    """
+    patch = _serialize_dict(values)
+    # Aggiungo sempre anche l'identificativo AC, così se l'utente modifica campi chiave restano coerenti
+    patch.setdefault("AC_CORRECTIVE_ACTION_NUM", str(ac_id))
+
+    # Prova endpoint dedicato
+    try:
+        _api_post("update_ac_wide", nc_number=str(nc_id), ac_id=str(ac_id), patch=patch)
+    except RuntimeError as e:
+        msg = str(e)
+        if "Unknown op" in msg or "update_ac_wide" in msg:
+            raise RuntimeError(
+                "La WebApp non supporta ancora l'operazione 'update_ac_wide'. "
+                "Serve aggiungerla in Code.gs (DATA) per salvare le AC quando NC e AC sono nello stesso foglio."
+            ) from e
+        raise
+    clear_caches()
+
+@st.cache_data(show_spinner=False)
+def load_platforms() -> list[str]:
+    data = _api_get("list_platforms") or []
+    return [str(x) for x in data if str(x).strip()]
+
+
+def add_platform(name: str):
+    name = (name or "").strip()
+    if not name:
+        return
+    _api_post("add_platform", name=name)
+    load_platforms.clear()
+
+
+def get_next_nc_number(df_nc: pd.DataFrame) -> str:
+    """Genera il prossimo numero NC nel formato NC-<n>-CVT leggendo il massimo esistente."""
+    if df_nc is None or df_nc.empty or "nonconformance_number" not in df_nc.columns:
+        return "NC-1-CVT"
+    max_n = 0
+    for val in df_nc["nonconformance_number"].astype(str).tolist():
+        m = re.match(r"NC-(\d+)-CVT", val.strip())
+        if m:
+            try:
+                n = int(m.group(1))
+                if n > max_n:
+                    max_n = n
+            except ValueError:
+                pass
+    return f"NC-{max_n + 1}-CVT"
+
+
+def get_next_ac_number(df_ac: pd.DataFrame) -> int:
+    """Restituisce il prossimo numero AC progressivo leggendo il massimo esistente."""
+    if df_ac is None or df_ac.empty or "ac_corrective_action_num" not in df_ac.columns:
+        return 1
+    nums = []
+    for v in df_ac["ac_corrective_action_num"].tolist():
+        try:
+            nums.append(int(str(v).strip()))
+        except Exception:
+            continue
+    return (max(nums) + 1) if nums else 1
+
+
 
 
 def get_status_options(df_nc: pd.DataFrame):
@@ -114,94 +565,9 @@ def get_status_options(df_nc: pd.DataFrame):
     return base
 
 
-def get_next_nc_number(conn) -> str:
-    """
-    Genera il prossimo numero NC nel formato NC-<n>-CVT
-    leggendo il massimo esistente.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT nonconformance_number FROM nonconformances "
-        "WHERE nonconformance_number LIKE 'NC-%-CVT'"
-    )
-    values = cur.fetchall()
-    max_n = 0
-    for (val,) in values:
-        m = re.match(r"NC-(\d+)-CVT", str(val))
-        if m:
-            try:
-                n = int(m.group(1))
-                if n > max_n:
-                    max_n = n
-            except ValueError:
-                continue
-    return f"NC-{max_n + 1}-CVT"
 
 
-def get_next_ac_number(conn) -> int:
-    """Restituisce il prossimo numero AC progressivo per l'intero DB."""
-    cur = conn.cursor()
-    cur.execute("SELECT ac_corrective_action_num FROM corrective_actions")
-    nums = []
-    for (val,) in cur.fetchall():
-        try:
-            nums.append(int(val))
-        except (TypeError, ValueError):
-            continue
-    return (max(nums) + 1) if nums else 1
 
-
-def update_nc_in_db(nc_id: int, values: dict):
-    conn = get_connection()
-    cur = conn.cursor()
-    cols = ", ".join([f"{k} = ?" for k in values.keys()])
-    sql = f"UPDATE nonconformances SET {cols} WHERE id = ?"
-    params = list(values.values()) + [nc_id]
-    cur.execute(sql, params)
-    conn.commit()
-    conn.close()
-    clear_caches()
-
-
-def insert_nc_in_db(values: dict) -> int:
-    """Inserisce una NC e restituisce l'id generato."""
-    conn = get_connection()
-    cur = conn.cursor()
-    columns = ", ".join(values.keys())
-    placeholders = ", ".join(["?"] * len(values))
-    sql = f"INSERT INTO nonconformances ({columns}) VALUES ({placeholders})"
-    cur.execute(sql, list(values.values()))
-    nc_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    clear_caches()
-    return nc_id
-
-
-def update_ac_in_db(ac_id: int, values: dict):
-    conn = get_connection()
-    cur = conn.cursor()
-    cols = ", ".join([f"{k} = ?" for k in values.keys()])
-    sql = f"UPDATE corrective_actions SET {cols} WHERE id = ?"
-    params = list(values.values()) + [ac_id]
-    cur.execute(sql, params)
-    conn.commit()
-    conn.close()
-    clear_caches()
-
-
-def insert_ac_in_db(nc_id: int, values: dict):
-    conn = get_connection()
-    cur = conn.cursor()
-    values_all = {"nc_id": nc_id}
-    values_all.update(values)
-    columns = ", ".join(values_all.keys())
-    placeholders = ", ".join(["?"] * len(values_all))
-    sql = f"INSERT INTO corrective_actions ({columns}) VALUES ({placeholders})"
-    cur.execute(sql, list(values_all.values()))
-    conn.commit()
-    conn.close()
-    clear_caches()
 
 def _normalize_name_for_email(s: str) -> str:
     """Toglie accenti e caratteri strani per costruire l'email."""
@@ -408,58 +774,9 @@ Here is all the information available (NC + AC):
 # GESTIONE PIATTAFORME
 # ============================================================
 
-def ensure_platform_table():
-    """Crea la tabella platforms se non esiste e la popola dalle NC esistenti."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS platforms (
-            name TEXT PRIMARY KEY
-        )
-        """
-    )
-    # popola con le piattaforme già presenti nelle NC
-    cur.execute(
-        "SELECT DISTINCT piattaforma FROM nonconformances "
-        "WHERE piattaforma IS NOT NULL AND TRIM(piattaforma) <> ''"
-    )
-    for (name,) in cur.fetchall():
-        cur.execute(
-            "INSERT OR IGNORE INTO platforms (name) VALUES (?)",
-            (name.strip(),),
-        )
-    conn.commit()
-    conn.close()
 
 
-@st.cache_data(show_spinner=False)
-def load_platforms() -> list[str]:
-    """Ritorna l'elenco delle piattaforme gestite."""
-    ensure_platform_table()
-    conn = get_connection()
-    df = pd.read_sql_query("SELECT name FROM platforms ORDER BY name", conn)
-    conn.close()
-    return df["name"].tolist()
 
-
-def add_platform(name: str):
-    """Aggiunge una nuova piattaforma."""
-    name = (name or "").strip()
-    if not name:
-        return
-    ensure_platform_table()
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO platforms (name) VALUES (?)", (name,))
-    conn.commit()
-    conn.close()
-    load_platforms.clear()
-
-
-# ============================================================
-# EMAIL HELPERS
-# ============================================================
 
 def send_email(to_addresses, subject, body):
     """Invia una mail di testo semplice tramite SMTP (Gmail o server aziendale)."""
@@ -486,55 +803,136 @@ def send_email(to_addresses, subject, body):
             print("Errore nell'invio della mail:", e)
 
 
-def get_nc_number_by_id(nc_id: int) -> str:
+def get_nc_number_by_id(nc_id: str) -> str:
     """Ritorna il numero NC a partire dall'id interno."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT nonconformance_number FROM nonconformances WHERE id = ?",
-        (nc_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    if row and row[0]:
-        return str(row[0])
+    try:
+        data = _api_get("get_nc", id=str(nc_id))
+    except Exception:
+        data = None
+    if isinstance(data, dict) and data.get("nonconformance_number"):
+        return str(data["nonconformance_number"])
     return f"ID {nc_id}"
 
 
+def get_nc_details(nc_id: str) -> dict:
+    """Ritorna i dettagli della NC come dict (vuoto se non trovata)."""
+    try:
+        data = _api_get("get_nc", id=str(nc_id))
+    except Exception:
+        data = None
+    return data if isinstance(data, dict) else {}
+
+
+def get_ac_details_for_nc(nc_id: str) -> list[dict]:
+    """Ritorna la lista delle AC collegate alla NC."""
+    try:
+        data = _api_get("list_ac_for_nc", nc_id=str(nc_id))
+    except Exception:
+        data = None
+    return data if isinstance(data, list) else []
+
+
+def _pick_first(d: dict, keys: list[str]) -> str:
+    """Prende il primo valore non vuoto tra più chiavi."""
+    for k in keys:
+        v = d.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s and s.lower() != "nan":
+            return s
+    return ""
+
+
+
+def _operation_to_action(operation: str) -> str:
+    """Mappa la descrizione operazione (UI) in action per l'endpoint send_mail."""
+    op = (operation or "").lower()
+    if "inser" in op or "crea" in op or "nuova" in op:
+        return "create_nc"
+    if "modif" in op or "aggiorn" in op or "update" in op:
+        return "update_nc"
+    # fallback
+    return "update_nc"
+
+def build_nc_email_message(nc_id: str | None, nc_number: str, operation: str) -> tuple[str, str]:
+    """Costruisce subject e body dell'email includendo dettagli NC e AC."""
+    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    nc = get_nc_details(nc_id) if nc_id is not None else {}
+    ac_list = get_ac_details_for_nc(nc_id) if nc_id is not None else []
+
+    # Campi NC (fallback robusti)
+    nc_subject = _pick_first(nc, ["subject", "oggetto", "incident_type", "nonconformance_source"]) or "(n/d)"
+    nc_short = _pick_first(nc, ["short_description"]) or "(n/d)"
+    nc_opened_by = _pick_first(nc, ["opened_by", "created_by", "opened_user", "created_user"]) or "(non indicato)"
+    nc_owner = _pick_first(nc, ["owner"]) or "(non indicato)"
+    nc_status = _pick_first(nc, ["nonconformance_status"]) or "(n/d)"
+
+    # Subject compatto ma informativo
+    short_part = f" - {nc_short}" if nc_short and nc_short != "(n/d)" else ""
+    subject = f"[NC {nc_number}] {operation}{short_part}"
+
+    lines: list[str] = []
+    lines.append("Gentile collega,")
+    lines.append("")
+    lines.append(f"Aggiornamento su Non Conformità: {nc_number}")
+    lines.append(f"Operazione: {operation}")
+    lines.append(f"Data e ora: {now_str}")
+    lines.append("")
+    lines.append("DETTAGLI NC")
+    lines.append(f"- Oggetto: {nc_subject}")
+    lines.append(f"- Short description: {nc_short}")
+    lines.append(f"- Aperta da: {nc_opened_by}")
+    lines.append(f"- In carico a: {nc_owner}")
+    lines.append(f"- Stato: {nc_status}")
+    lines.append("")
+    lines.append("AZIONI CORRETTIVE (AC)")
+
+    if not ac_list:
+        lines.append("- Nessuna AC presente.")
+    else:
+        for ac in ac_list:
+            ac_num = _pick_first(ac, ["ac_corrective_action_num"]) or "(n/d)"
+            ac_short = _pick_first(ac, ["ac_short_description"]) or "(n/d)"
+            ac_owner = _pick_first(ac, ["ac_owner"]) or "(non indicato)"
+            ac_status = _pick_first(ac, ["ac_request_status"]) or "(n/d)"
+            ac_open = _pick_first(ac, ["ac_date_opened"]) or ""
+            ac_req = _pick_first(ac, ["ac_date_required"]) or ""
+            ac_end = _pick_first(ac, ["ac_end_date"]) or ""
+
+            lines.append(f"- AC {ac_num}: {ac_short}")
+            lines.append(f"  In carico a: {ac_owner} | Stato: {ac_status}")
+            if ac_open:
+                lines.append(f"  Data apertura: {ac_open}")
+            if ac_req:
+                lines.append(f"  Data richiesta chiusura: {ac_req}")
+            if ac_end:
+                lines.append(f"  Data chiusura effettiva: {ac_end}")
+
+    lines.append("")
+    lines.append("Puoi consultare i dettagli completi nell’applicativo NC Management.")
+    lines.append("")
+    lines.append("Questa è una comunicazione automatica: si prega di non rispondere.")
+    body = "\n".join(lines)
+    return subject, body
+
 def get_emails_for_nc(nc_id: int) -> list[str]:
-    """
-    Ricava gli indirizzi email associati a una NC.
-    Usa i campi email_address (NC) e ac_email_address (AC).
-    """
+    """Ritorna tutti gli indirizzi email associati a una NC e alle sue AC."""
     emails = set()
-    conn = get_connection()
-    cur = conn.cursor()
 
-    # email principale sulla NC
-    try:
-        cur.execute(
-            "SELECT email_address FROM nonconformances WHERE id = ?",
-            (nc_id,),
-        )
-        row = cur.fetchone()
-        if row and row[0]:
-            emails.add(row[0])
-    except Exception:
-        pass
+    nc = get_nc_details(nc_id)
+    if isinstance(nc, dict):
+        v = (nc.get("email_address") or "").strip()
+        if v:
+            emails.add(v)
 
-    # email dalle AC collegate
-    try:
-        cur.execute(
-            "SELECT DISTINCT ac_email_address FROM corrective_actions WHERE nc_id = ?",
-            (nc_id,),
-        )
-        for (mail,) in cur.fetchall():
-            if mail:
-                emails.add(mail)
-    except Exception:
-        pass
+    ac_list = get_ac_details_for_nc(nc_id)
+    for ac in ac_list or []:
+        v = (ac.get("ac_email_address") or "").strip()
+        if v:
+            emails.add(v)
 
-    conn.close()
     return sorted(emails)
 
 
@@ -546,7 +944,7 @@ def trigger_email_prompt(nc_id: int, operation: str):
 
 
 def render_email_prompt():
-    """Mostra, se necessario, il box per inviare le modifiche agli owner."""
+    """Mostra (una sola volta) il box per inviare email di notifica agli owner."""
     if not st.session_state.get("show_email_prompt"):
         return
 
@@ -554,6 +952,12 @@ def render_email_prompt():
     operation = st.session_state.get("email_operation", "Aggiornamento NC")
     nc_number = get_nc_number_by_id(nc_id) if nc_id is not None else "n/d"
     emails = get_emails_for_nc(nc_id) if nc_id is not None else []
+
+    # Chiavi univoche (evita StreamlitDuplicateElementKey)
+    safe_op = re.sub(r"[^A-Za-z0-9]+", "_", str(operation))
+    ctx = f"{nc_id}_{safe_op}"
+    yes_key = f"email_send_yes_{ctx}"
+    no_key = f"email_send_no_{ctx}"
 
     st.markdown("---")
     with st.container():
@@ -572,29 +976,63 @@ def render_email_prompt():
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("✉️ Sì, invia", key="email_send_yes"):
+            if st.button("✉️ Sì, invia", key=yes_key):
                 if emails:
-                    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
-                    subject = f"[NC {nc_number}] {operation}"
-                    body = (
-                        "Gentile Owner,\n\n"
-                        f"Sulla Non Conformità n. {nc_number} è stata registrata la seguente attività:\n\n"
-                        f"• Operazione: {operation}\n"
-                        f"• Data e ora: {now_str}\n\n"
-                        "Puoi consultare i dettagli completi nell’applicativo NC Management.\n\n"
-                        "Questa è una comunicazione automatica: si prega di non rispondere."
-                    )
-                    send_email(emails, subject, body)
-                    st.success("Email inviata agli owner.")
-                st.session_state["show_email_prompt"] = False
-        with col2:
-            if st.button("❌ No, non inviare", key="email_send_no"):
-                st.session_state["show_email_prompt"] = False
+                    # Invio via Apps Script dal browser (iframe invisibile):
+                    # mittente reale = utente Workspace loggato
+                    nc = get_nc_details(nc_id) if nc_id is not None else {}
+                    ac_list = get_ac_details_for_nc(nc_id) if nc_id is not None else []
 
+                    action = _operation_to_action(operation)
+                    subject_val = _pick_first(nc, ["subject", "oggetto", "incident_type", "nonconformance_source"])
+
+                    payload_key = f"email_payload_{ctx}"
+                    st.session_state[payload_key] = {
+                       "type": action,
+                       "to": ", ".join(emails),
+                       "nc": {
+                           "nonconformance_number": nc.get("nonconformance_number", nc_number),
+                           "subject": subject_val,
+                           "short_description": nc.get("short_description", ""),
+                           "opened_by": nc.get("created_by", "") or nc.get("owner", ""),
+                           "responsibility": nc.get("responsibility", ""),
+                           "nonconformance_status": nc.get("nonconformance_status", ""),
+                           "piattaforma": nc.get("piattaforma", ""),
+                       },
+                       "ac_list": [
+                           {
+                               "ac_corrective_action_num": a.get("ac_corrective_action_num", ""),
+                               "ac_short_description": a.get("ac_short_description", ""),
+                               "ac_owner": a.get("ac_owner", ""),
+                               "ac_request_status": a.get("ac_request_status", ""),
+                           }
+                           for a in (ac_list or [])
+                       ],
+                   }
+                else:
+                    st.warning("Nessun indirizzo email trovato: impossibile inviare.")
+
+            # Se è stato premuto 'Sì, invia' mostro il widget di invio in iframe (senza redirect)
+            payload_key = f"email_payload_{ctx}"
+            if st.session_state.get(payload_key):
+                send_mail_via_hidden_iframe(
+                    _script_url_mail(),
+                    st.session_state[payload_key],
+                    key=f"mail_{ctx}",
+                )
+                if st.button("✅ Chiudi", key=f"email_close_{ctx}"):
+                    st.session_state["show_email_prompt"] = False
+                    st.session_state.pop(payload_key, None)
+                    st.rerun()
+
+        with col2:
+            if st.button("❌ No, non inviare", key=no_key):
+                st.session_state["show_email_prompt"] = False
 
 # ============================================================
 # UTIL GRAFICI E DATE
 # ============================================================
+
 
 def apply_nc_filters(df: pd.DataFrame) -> pd.DataFrame:
     """Applica i filtri scelti in UI al DataFrame delle NC."""
@@ -656,28 +1094,29 @@ def render_status_html(status: str) -> str:
 
 
 def safe_date_for_input(val):
-    """Converte valori vari (stringhe, date, Timestamp, NaT) in date o None."""
     if val is None or val == "":
         return None
     try:
-        import pandas as pd  # type: ignore
+        import pandas as pd
+        if pd.isna(val):
+            return None
         if isinstance(val, pd.Timestamp):
-            if pd.isna(val):
-                return None
             return val.date()
     except Exception:
         pass
+
     if isinstance(val, datetime):
         return val.date()
     if isinstance(val, date):
         return val
+
     if isinstance(val, str):
         try:
             return datetime.fromisoformat(val).date()
         except ValueError:
             return None
-    return None
 
+    return None
 
 def compute_trend_from_db(df_nc: pd.DataFrame, weeks_back: int = 52) -> pd.DataFrame:
     """Esempio di calcolo trend (semplificato) direttamente dal DB NC."""
@@ -758,12 +1197,20 @@ def view_lista(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
             st.warning("Nessuna AC presente nel database.")
             return
 
+        # Evita merge: se df_nc contiene duplicati (export Oracle wide), un merge può esplodere (cartesian).
+        # Usiamo una mappa 1:1 id->numero NC.
         df = df_ac.copy()
-        df = df.merge(
-            df_nc[["id", "nonconformance_number"]].rename(columns={"id": "nc_id"}),
-            on="nc_id",
-            how="left",
-        )
+        if "nc_id" in df.columns and "id" in df_nc.columns and "nonconformance_number" in df_nc.columns:
+            nc_map = (
+                df_nc.drop_duplicates(subset=["id"])
+                .set_index("id")["nonconformance_number"]
+                .astype(str)
+            )
+            df["nonconformance_number"] = df["nc_id"].astype(str).map(nc_map)
+        else:
+            # fallback (non dovrebbe servire)
+            if "nonconformance_number" not in df.columns:
+                df["nonconformance_number"] = ""
 
         ac_columns = [
             "nonconformance_number",
@@ -834,7 +1281,7 @@ def view_consulta_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         row = row.iloc[0]
         display_status = get_display_status(row)
         parent_ref = str(row.get("nc_parent_ref") or "").strip()
-        nc_id = int(row["id"])
+        nc_id = str(row["id"]).strip()
         nc_number = row["nonconformance_number"]
 
         if st.button("⬅ Torna all’elenco"):
@@ -886,7 +1333,7 @@ def view_consulta_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         st.markdown("---")
         st.subheader("Azioni Correttive collegate")
 
-        df_ac_nc = df_ac[df_ac["nc_id"] == nc_id].copy()
+        df_ac_nc = df_ac[df_ac.get("nc_id", pd.Series(dtype=str)).astype(str).str.strip() == str(nc_id)].copy()
         if df_ac_nc.empty:
             st.info("Nessuna AC collegata a questa NC.")
         else:
@@ -920,17 +1367,18 @@ def view_consulta_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
     # ========= VISTA ELENCO =========
     st.subheader("Elenco NC")
 
-    # df_list esiste sempre e non causa errori
+    # Base lista (sempre definita)
+    df_list = df_nc.copy()
+
+    # stato visualizzato (NEW/OPEN/MANAGED/CLOSED...)
     if not df_list.empty:
+        df_list["display_status"] = df_list.apply(get_display_status, axis=1)
+
         counts = df_list["display_status"].value_counts()
         recap_parts = [f"{cnt} in stato {stato}" for stato, cnt in counts.items()]
         st.caption(" | ".join(recap_parts))
     else:
         st.caption("Nessuna NC selezionata o disponibile.")
-
-    df_list = df_nc.copy()
-    # stato visualizzato (NEW/OPEN/MANAGED/CLOSED...)
-    df_list["display_status"] = df_list.apply(get_display_status, axis=1)
     df_list = df_list.sort_values(
         ["date_opened", "nonconformance_number"], ascending=[False, True]
     )
@@ -963,7 +1411,7 @@ def view_consulta_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
 
     st.markdown("---")
 
-    for _, r in df_list.iterrows():
+    for i, (_, r) in enumerate(df_list.iterrows()):
         c1, c2, c3, c4, c5, c6, c7 = st.columns([1.4, 1, 1, 1, 1, 3, 1])
 
         c1.write(r.get("nonconformance_number", ""))
@@ -977,9 +1425,9 @@ def view_consulta_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         c6.write(r.get("short_description", ""))
         c7.write(r.get("owner", ""))
 
-        if c7.button("Dettaglio", key=f"det_nc_{r['id']}"):
+        if c7.button("Dettaglio", key=f"det_nc_{i}_{r.get('id','')}"):
             st.session_state["consulta_mode"] = "detail"
-            st.session_state["consulta_nc_id"] = int(r["id"])
+            st.session_state["consulta_nc_id"] = str(r["id"]).strip()
             st.rerun()
 
         # linea orizzontale tra le NC
@@ -1003,7 +1451,7 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         st.error("NC non trovata.")
         return
     row = row.iloc[0]
-    nc_id = int(row["id"])
+    nc_id = str(row["id"]).strip()
 
     st.subheader("Dati NC")
 
@@ -1053,7 +1501,22 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
             )
         with col2:
             date_closed_val = safe_date_for_input(row.get("date_closed"))
-            date_closed = st.date_input("Data chiusura", value=date_closed_val)
+
+            has_date_closed = st.checkbox(
+                "Data chiusura impostata",
+                value=(date_closed_val is not None),
+                key=f"has_date_closed_{nc_id}",
+            )
+
+            if has_date_closed:
+                date_closed = st.date_input(
+                    "Data chiusura",
+                    value=(date_closed_val or date.today()),
+                    key=f"date_closed_{nc_id}",
+            )
+            else:
+                date_closed = None
+                st.caption("Data chiusura: —")
 
         detailed_description = st.text_area(
             "Descrizione dettagliata", value=row.get("detailed_description") or ""
@@ -1109,7 +1572,7 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
     st.markdown("---")
     st.subheader("Azioni Correttive collegate")
 
-    df_ac_nc = df_ac[df_ac["nc_id"] == nc_id].copy()
+    df_ac_nc = df_ac[df_ac.get("nc_id", pd.Series(dtype=str)).astype(str).str.strip() == str(nc_id)].copy()
 
     ac_ids = df_ac_nc["id"].tolist()
     ac_labels = [
@@ -1124,7 +1587,7 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
     if selected_ac_label:
         idx = ac_labels.index(selected_ac_label)
         ac_row = df_ac_nc.iloc[idx]
-        ac_id = int(ac_row["id"])
+        ac_id = str(ac_row["id"]).strip()
 
         st.write(f"**AC selezionata:** {ac_row['ac_corrective_action_num']}")
 
@@ -1206,17 +1669,15 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
                     if ac_follow_up_date
                     else None,
                 }
-                update_ac_in_db(ac_id, vals_ac)
+                update_ac_in_db(nc_id, ac_id, vals_ac)
                 st.success("AC aggiornata con successo.")
                 trigger_email_prompt(nc_id, f"Modifica AC {ac_row['ac_corrective_action_num']}")
 
     st.markdown("---")
     st.subheader("➕ Aggiungi nuova AC per questa NC")
 
-    conn = get_connection()
-    with conn:
-        next_ac_number = get_next_ac_number(conn)
-    conn.close()
+    df_ac_all = load_ac_data()
+    next_ac_number = get_next_ac_number(df_ac_all)
     st.info(f"Nuovo numero AC proposto: **{next_ac_number}**")
 
     with st.form(key="form_inserisci_ac"):
@@ -1284,10 +1745,8 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
         "CANCELLED",
     ]
 
-    conn = get_connection()
-    with conn:
-        new_nc_number = get_next_nc_number(conn)
-    conn.close()
+    # Proposta numero NC (calcolata lato app dal massimo esistente)
+    new_nc_number = get_next_nc_number(df_nc)
 
     st.info(f"Il nuovo numero NC proposto è: **{new_nc_number}**")
 
@@ -1296,19 +1755,21 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
     with st.form(key="form_inserisci_nc"):
         st.text_input("Numero NC", value=new_nc_number, disabled=True)
 
+        # --- QUI IL BLOCCO CORRETTO PER LA PIATTAFORMA ---
         serie = st.text_input("Serie *")
+
         platforms = load_platforms()
-        current_plat = row.get("piattaforma") or ""
+        current_plat = ""  # nuova NC: nessun valore preesistente
+
         if platforms:
-            if current_plat and current_plat not in platforms:
-                platforms = [current_plat] + [p for p in platforms if p != current_plat]
             piattaforma = st.selectbox(
                 "Piattaforma",
                 options=platforms,
-                index=platforms.index(current_plat) if current_plat in platforms else 0,
+                index=0,
             )
         else:
             piattaforma = st.text_input("Piattaforma", value=current_plat)
+        # --- FINE BLOCCO PIATTAFORMA ---
 
         short_description = st.text_input("Short description *")
 
@@ -1347,7 +1808,6 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
                 for e in errors:
                     st.error(e)
             else:
-                # auto-suggerimento email se campo lasciato vuoto
                 owner_clean = owner.strip()
                 email_clean = email_address.strip()
                 if not email_clean and owner_clean:
@@ -1463,10 +1923,60 @@ def main():
         ),
     )
 
-    st.caption(f"Database: `{DB_PATH}`")
+    st.caption("Backend: Google Sheets (Apps Script)")
 
-    df_nc = load_nc_data()
-    df_ac = load_ac_data()
+
+    import time
+    t0 = time.perf_counter()
+    st.info("⏳ Carico dati dal backend…")
+    try:
+        df_nc = load_nc_data()
+        df_ac = load_ac_data()
+    except Exception as e:
+        st.error("Errore caricamento dati dal backend")
+        st.exception(e)
+        st.stop()
+    finally:
+        dt = time.perf_counter() - t0
+        st.sidebar.write(f"⏱️ Load time: {dt:.2f}s")
+
+    # Healthcheck rapido (sempre visibile)
+    with st.sidebar.expander("📟 Healthcheck", expanded=True):
+        st.write("DATA URL:", _script_url_data())
+        st.write("NC rows:", 0 if df_nc is None else len(df_nc))
+        st.write("AC rows:", 0 if df_ac is None else len(df_ac))
+        if df_nc is not None and not df_nc.empty:
+            st.write("NC cols (first 15):", list(df_nc.columns)[:15])
+        if df_ac is not None and not df_ac.empty:
+            st.write("AC cols (first 15):", list(df_ac.columns)[:15])
+
+
+    # --- DEBUG (puoi disattivare quando tutto è ok) ---
+    with st.sidebar.expander('Debug backend', expanded=False):
+        st.write('DATA URL:', _script_url_data())
+        st.write('NC rows:', len(df_nc))
+        st.write('AC rows:', len(df_ac))
+        st.write('NC columns:', list(df_nc.columns)[:25], '...' if len(df_nc.columns)>25 else '')
+        if len(df_nc) > 0:
+            st.write('NC sample (first row):')
+            st.json(df_nc.iloc[0].to_dict())
+        if len(df_ac) > 0:
+            st.write('AC sample (first row):')
+            st.json(df_ac.iloc[0].to_dict())
+
+    # Se NC e AC arrivano dallo stesso foglio (export Oracle), separa qui
+    if df_ac.empty:
+        df_nc, df_ac_from_nc = _split_combined_nc_ac(df_nc)
+        if not df_ac_from_nc.empty:
+            df_ac = df_ac_from_nc
+
+    if df_nc.empty:
+        st.warning('Nessuna NC trovata. Controlla la WebApp DATA (?op=list_nc) e il nome del TAB nel Google Sheet.')
+        st.stop()
+    else:
+        # comunque dedup NC per id per evitare duplicati in lista
+        if not df_nc.empty and "id" in df_nc.columns:
+            df_nc = df_nc.drop_duplicates(subset=["id"]).copy()
 
     if scelta.startswith("1"):
         view_lista(df_nc, df_ac)
@@ -1480,12 +1990,19 @@ def main():
         view_trend_nc_quality_db(df_nc)
     elif scelta.startswith("6"):
         view_gestione_piattaforme()
-
-    render_email_prompt()
-
     # Box di invio email, se richiesto da una delle view
     render_email_prompt()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # Fallback: se l'eccezione avviene prima che Streamlit riesca a renderizzare
+        import streamlit as st
+        try:
+            st.set_page_config(page_title="NC Management", layout="wide")
+        except Exception:
+            pass
+        st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace qui in chat.")
+        st.exception(e)
