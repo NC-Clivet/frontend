@@ -14,25 +14,35 @@ except ImportError:
 # SECRETS / CONFIG
 # ============================================================
 
-def _secret_get(path: list[str], default=""):
-    cur = st.secrets
-    for p in path:
-        if isinstance(cur, dict) and p in cur:
-            cur = cur[p]
-        else:
-            return default
-    return cur
+def secret_any(*paths, default=""):
+    # paths: lista di tuple tipo ("google","data_script_url") oppure ("data_script_url",)
+    for path in paths:
+        try:
+            cur = st.secrets
+            ok = True
+            for p in path:
+                if isinstance(cur, dict) and p in cur:
+                    cur = cur[p]
+                else:
+                    ok = False
+                    break
+            if ok:
+                val = str(cur).strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+    return default
 
-DATA_SCRIPT_URL = _secret_get(["google", "data_script_url"], "").split("?")[0]
-MAIL_SCRIPT_URL = _secret_get(["google", "mail_script_url"], "").split("?")[0] or DATA_SCRIPT_URL
+DATA_SCRIPT_URL = secret_any(("google","data_script_url"), ("DATA_SCRIPT_URL",), ("data_script_url",), default="").split("?")[0]
+MAIL_SCRIPT_URL = secret_any(("google","mail_script_url"), ("MAIL_SCRIPT_URL",), ("mail_script_url",), default="").split("?")[0]
 
-DATA_KEY = _secret_get(["google", "data_key"], "")  # opzionale, se hai attivato DATA_API_KEY in Code.gs
-
-GEMINI_MODEL = _secret_get(["gemini", "model"], "gemini-2.5-flash")
-GEMINI_API_KEY = _secret_get(["gemini", "api_key"], "") or _secret_get(["GEMINI_API_KEY"], "")
+GEMINI_API_KEY = secret_any(("gemini","api_key"), ("GEMINI_API_KEY",), ("gemini_api_key",), default="")
+GEMINI_MODEL   = secret_any(("gemini","model"), ("GEMINI_MODEL",), ("gemini_model",), default="gemini-2.5-flash")
 
 if not DATA_SCRIPT_URL:
-    raise RuntimeError("Manca st.secrets[google][data_script_url]")
+    raise RuntimeError("Manca la URL Apps Script DATA: imposta secrets google.data_script_url (o DATA_SCRIPT_URL).")
+
 
 # ============================================================
 # HELPERS API
