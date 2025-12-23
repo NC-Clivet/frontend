@@ -1,6 +1,3 @@
-#Lorenzo14Letizia16
-#https://supabase.com/dashboard/new/bxroekhdypvcisehhcdk?projectName=NC-Clivet%27s%20Project
-
 import re
 
 from datetime import date, datetime
@@ -26,7 +23,13 @@ except ImportError:
     genai = None
 
 GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or (st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") else None) or (st.secrets.get("gemini", {}).get("api_key") if hasattr(st, "secrets") else None) or ""
+# ----------------------------
+# DOMAIN CONSTANTS (UI)
+# ----------------------------
+NC_STATUS_SELECTABLE = ["New", "Managed", "Close"]            # selezionabili in inserimento/modifica
+NC_STATUS_ALL = NC_STATUS_SELECTABLE + ["Cancelled"]          # 'Cancelled' esiste ma NON selezionabile in inserimento
+RESPONSIBILITY_OPTIONS = ["R&D", "Operation", "Supplier", "MKT", "Other", "Third party"]
+MAKEBUY_OPTIONS = ["manufactured", "traded"]
 
 
 
@@ -565,22 +568,48 @@ def get_next_ac_number(df_ac: pd.DataFrame) -> int:
 
 
 
+
 def get_status_options(df_nc: pd.DataFrame):
-    """Lista di stati possibili per la NC."""
-    if df_nc is None or df_nc.empty:
-        return ["OPEN", "CLOSED", "CANCELLED"]
-    vals = sorted(
-        {
-            str(v).strip()
-            for v in df_nc["nonconformance_status"].dropna().tolist()
-            if str(v).strip()
-        }
-    )
-    base = ["OPEN", "CLOSED", "CANCELLED"]
-    for v in vals:
-        if v not in base:
-            base.append(v)
-    return base
+    """Lista di stati possibili per la NC (normalizzata).
+
+    - In inserimento NC: solo New, Managed, Close
+    - Cancelled esiste ma non è selezionabile in inserimento
+    - Se nel DB ci sono valori storici (OPEN/CLOSED/...), li mappiamo per compatibilità.
+    """
+    base = list(NC_STATUS_ALL)
+
+    if df_nc is None or df_nc.empty or "nonconformance_status" not in df_nc.columns:
+        return base
+
+    vals_raw = {
+        str(v).strip()
+        for v in df_nc["nonconformance_status"].dropna().tolist()
+        if str(v).strip()
+    }
+
+    def norm(s: str) -> str:
+        u = s.strip().upper()
+        if u in ("OPEN", "NEW"):
+            return "New"
+        if u in ("CLOSED", "CLOSE", "CLOSED/VERIFIED", "CHIUSA"):
+            return "Close"
+        if u == "MANAGED":
+            return "Managed"
+        if u in ("CANCELLED", "CANCELED", "CANCELLATA"):
+            return "Cancelled"
+        if s in NC_STATUS_ALL:
+            return s
+        return s.title()
+
+    # mantieni ordine: prima base, poi eventuali extra
+    final = []
+    for s in base:
+        if s not in final:
+            final.append(s)
+    for s in [norm(v) for v in vals_raw]:
+        if s and s not in final:
+            final.append(s)
+    return final
 
 
 
@@ -1052,6 +1081,7 @@ def render_email_prompt():
 # ============================================================
 
 
+
 def apply_nc_filters(df: pd.DataFrame) -> pd.DataFrame:
     """Applica i filtri scelti in UI al DataFrame delle NC."""
     nc_number_filter = st.text_input("Numero NC contiene:", value="").strip()
@@ -1062,22 +1092,27 @@ def apply_nc_filters(df: pd.DataFrame) -> pd.DataFrame:
             .str.contains(nc_number_filter, case=False, na=False)
         ]
 
-    status_list = sorted(df["nonconformance_status"].dropna().unique().tolist())
-    status_selected = st.multiselect("Stato NC", status_list, default=[])
-    if status_selected:
-        df = df[df["nonconformance_status"].isin(status_selected)]
+    # Stati (lista fissa + eventuali stati storici)
+    status_options = get_status_options(df)
+    status_selected = st.multiselect("Stato NC", status_options, default=[])
+    if status_selected and "nonconformance_status" in df.columns:
+        # filtro su display_status per includere Managed da parent
+        if "display_status" not in df.columns:
+            df["display_status"] = df.apply(get_display_status, axis=1)
+        df = df[df["display_status"].isin(status_selected)]
 
-    resp_list = sorted(df["responsibility"].dropna().unique().tolist())
-    responsibility_selected = st.multiselect("Responsabilità", resp_list, default=[])
-    if responsibility_selected:
+    # Responsabilità (lista fissa)
+    responsibility_selected = st.multiselect("Responsabilità", RESPONSIBILITY_OPTIONS, default=[])
+    if responsibility_selected and "responsibility" in df.columns:
         df = df[df["responsibility"].isin(responsibility_selected)]
 
-    owner_list = sorted(df["owner"].dropna().unique().tolist())
+    owner_list = sorted(df.get("owner", pd.Series(dtype=str)).dropna().unique().tolist())
     owner_selected = st.multiselect("Owner", owner_list, default=[])
-    if owner_selected:
+    if owner_selected and "owner" in df.columns:
         df = df[df["owner"].isin(owner_selected)]
 
     return df
+
 
 
 def style_ac_table(df_ac: pd.DataFrame) -> "pd.io.formats.style.Styler":
@@ -1086,24 +1121,40 @@ def style_ac_table(df_ac: pd.DataFrame) -> "pd.io.formats.style.Styler":
         **{"white-space": "nowrap", "text-overflow": "ellipsis", "max-width": "300px"}
     )
 
+
 def get_display_status(row: pd.Series) -> str:
     """Restituisce lo stato 'visuale' della NC (considerando eventuale parent)."""
-    raw = (row.get("nonconformance_status") or "").upper().strip()
+    raw = str(row.get("nonconformance_status") or "").strip()
     parent_ref = str(row.get("nc_parent_ref") or "").strip()
+
     if parent_ref:
-        return "MANAGED"
-    return raw or "NEW"
+        return "Managed"
+
+    u = raw.upper()
+    if u in ("OPEN", "NEW"):
+        return "New"
+    if u in ("CLOSED", "CLOSE", "CLOSED/VERIFIED", "CHIUSA"):
+        return "Close"
+    if u in ("CANCELLED", "CANCELED", "CANCELLATA"):
+        return "Cancelled"
+    if u == "MANAGED":
+        return "Managed"
+
+    return raw if raw else "New"
+
+
 
 
 def status_to_color(status: str) -> str:
-    s = (status or "").upper()
-    if s in ("NEW", "OPEN"):
-        return "#cc0000"  # rosso
-    if s == "MANAGED":
-        return "#ff8800"  # arancione
-    if s in ("CLOSED", "CLOSE", "CLOSED/VERIFIED", "CANCELLED", "CANCELED", "CHIUSA"):
-        return "#008000"  # verde
+    s = (status or "").strip().lower()
+    if s in ("new", "open"):
+        return "#cc0000"   # rosso
+    if s == "managed":
+        return "#ff8800"   # arancione
+    if s in ("close", "closed", "cancelled", "canceled"):
+        return "#008000"   # verde
     return "#555555"      # grigio
+
 
 
 def render_status_html(status: str) -> str:
@@ -1487,19 +1538,35 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
             "Short description", value=row.get("short_description") or ""
         )
 
-        current_status = row.get("nonconformance_status") or "OPEN"
+        current_mb = (row.get("item") or row.get("ITEM") or "").strip().lower()
+        if current_mb not in MAKEBUY_OPTIONS:
+            current_mb = ""
+        mb_index = MAKEBUY_OPTIONS.index(current_mb) if current_mb in MAKEBUY_OPTIONS else 0
+        makebuy = st.selectbox("Traded / Manufactured (colonna ITEM)", options=MAKEBUY_OPTIONS, index=mb_index)
+
+        current_status = get_display_status(row)
         if current_status not in status_options:
             status_options = [current_status] + status_options
         status = st.selectbox(
-            "Stato NC", options=status_options, index=status_options.index(current_status)
+            "Stato NC",
+            options=status_options,
+            index=status_options.index("New") if "New" in status_options else 0,
         )
 
         nonconform_priority = st.text_input(
             "Priorità NC", value=row.get("nonconform_priority") or ""
         )
-        responsibility = st.text_input(
-            "Responsabilità", value=row.get("responsibility") or ""
+
+        current_resp = (row.get("responsibility") or "").strip()
+        resp_opts = list(RESPONSIBILITY_OPTIONS)
+        if current_resp and current_resp not in resp_opts:
+            resp_opts = [current_resp] + resp_opts
+        responsibility = st.selectbox(
+            "Responsabilità",
+            options=resp_opts,
+            index=resp_opts.index(current_resp) if current_resp in resp_opts else 0,
         )
+
         owner = st.text_input("Owner NC", value=row.get("owner") or "")
         email_address = st.text_input(
             "Email owner NC", value=row.get("email_address") or ""
@@ -1567,6 +1634,8 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
                 vals = {
                     "serie": serie.strip(),
                     "piattaforma": piattaforma.strip(),
+                    "item": makebuy,
+                    "ITEM": makebuy,
                     "short_description": short_description.strip(),
                     "nonconformance_status": status.strip(),
                     "nonconform_priority": nonconform_priority.strip() or None,
@@ -1757,11 +1826,8 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
 def view_inserisci_nc(df_nc: pd.DataFrame):
     st.header("➕ Inserisci nuova NC")
 
-    status_options = get_status_options(df_nc) if not df_nc.empty else [
-        "OPEN",
-        "CLOSED",
-        "CANCELLED",
-    ]
+        # In inserimento: lista fissa (Cancelled non selezionabile)
+    status_options = list(NC_STATUS_SELECTABLE)
 
     # Proposta numero NC (calcolata lato app dal massimo esistente)
     new_nc_number = get_next_nc_number(df_nc)
@@ -1791,14 +1857,15 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
 
         short_description = st.text_input("Short description *")
 
+        makebuy = st.selectbox("Traded / Manufactured (colonna ITEM)", options=MAKEBUY_OPTIONS, index=0)
         status = st.selectbox(
             "Stato NC",
             options=status_options,
-            index=status_options.index("OPEN") if "OPEN" in status_options else 0,
+            index=status_options.index("New") if "New" in status_options else 0,
         )
 
         nonconform_priority = st.text_input("Priorità NC")
-        responsibility = st.text_input("Responsabilità")
+        responsibility = st.selectbox("Responsabilità", options=RESPONSIBILITY_OPTIONS, index=0)
         owner = st.text_input("Owner NC")
         email_address = st.text_input("Email owner NC")
         nonconformance_source = st.text_input("Fonte NC (source)")
@@ -1839,6 +1906,8 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
                     "nonconformance_status": status.strip(),
                     "serie": serie.strip(),
                     "piattaforma": piattaforma.strip(),
+                    "item": makebuy,
+                    "ITEM": makebuy,
                     "short_description": short_description.strip(),
                     "nonconform_priority": nonconform_priority.strip() or None,
                     "responsibility": responsibility.strip() or None,
@@ -1856,66 +1925,100 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
                 trigger_email_prompt(nc_id, "Nuova NC creata")
 
 
+
 def view_trend_nc_quality_db(df_nc: pd.DataFrame):
-    st.header("📈 Trend NC Quality")
+    st.header("📈 Trend NC (ultime 8 settimane)")
 
-    trend_df = load_trend_data()
-    if trend_df.empty:
-        st.warning("Nessun dato trend disponibile.")
+    if df_nc is None or df_nc.empty:
+        st.warning("Nessuna NC disponibile.")
         return
 
-    trend_df = trend_df.dropna(subset=["data_pubblicazione"])
-    if trend_df.empty:
-        st.warning("Nessun dato trend con data valida.")
-        return
+    df = df_nc.copy()
 
-    min_date = trend_df["data_pubblicazione"].min().date()
-    max_date = trend_df["data_pubblicazione"].max().date()
+    # date
+    df["date_opened_dt"] = pd.to_datetime(df.get("date_opened"), errors="coerce")
+    df["date_closed_dt"] = pd.to_datetime(df.get("date_closed"), errors="coerce")
 
-    st.caption(f"Dati disponibili da {min_date} a {max_date}")
+    # make/buy in colonna ITEM (valori: manufactured / traded)
+    mb = df.get("item", pd.Series("", index=df.index)).astype(str)
+    if "ITEM" in df.columns:
+        mb = mb.where(mb.str.strip().ne(""), df["ITEM"].astype(str))
+    df["makebuy"] = mb.str.strip().str.lower()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input(
-            "Da data", value=min_date, min_value=min_date, max_value=max_date
-        )
-    with col2:
-        end_date = st.date_input(
-            "A data", value=max_date, min_value=min_date, max_value=max_date
-        )
+    today = pd.Timestamp.today().normalize()
+    # ultime 8 settimane (inclusa quella corrente)
+    week_starts = pd.date_range(end=today, periods=8, freq="W-MON")  # lunedì
+    weeks = pd.DataFrame({"week_start": week_starts})
+    weeks["week_end"] = weeks["week_start"] + pd.Timedelta(days=6)
 
-    mask = (trend_df["data_pubblicazione"].dt.date >= start_date) & (
-        trend_df["data_pubblicazione"].dt.date <= end_date
+    def count_started(ws, we):
+        m = (df["date_opened_dt"] >= ws) & (df["date_opened_dt"] <= we)
+        return int(m.sum())
+
+    def count_closed(ws, we):
+        m = (df["date_closed_dt"] >= ws) & (df["date_closed_dt"] <= we)
+        return int(m.sum())
+
+    def count_still_open(at_end, manufactured_only=False):
+        opened = df["date_opened_dt"].notna() & (df["date_opened_dt"] <= at_end)
+        not_closed = df["date_closed_dt"].isna() | (df["date_closed_dt"] > at_end)
+        m = opened & not_closed
+        if manufactured_only:
+            m = m & (df["makebuy"] == "manufactured")
+        return int(m.sum())
+
+    started = []
+    closed = []
+    still_open = []
+    still_open_make = []
+
+    for _, w in weeks.iterrows():
+        ws = w["week_start"]
+        we = w["week_end"]
+        started.append(count_started(ws, we))
+        closed.append(count_closed(ws, we))
+        still_open.append(count_still_open(we, manufactured_only=False))
+        still_open_make.append(count_still_open(we, manufactured_only=True))
+
+    out = weeks.copy()
+    out["Started last 8 weeks"] = started
+    out["Closed last 8 weeks"] = closed
+    out["Still open"] = still_open
+    out["Still open Make"] = still_open_make
+
+    # Melt per Altair
+    melt = out.melt(
+        id_vars=["week_start"],
+        value_vars=["Started last 8 weeks", "Closed last 8 weeks", "Still open", "Still open Make"],
+        var_name="metric",
+        value_name="value",
     )
-    trend_filt = trend_df[mask].copy()
 
-    if trend_filt.empty:
-        st.warning("Nessun dato nel range selezionato.")
-        return
-
-    value_cols = [
-        col for col in trend_filt.columns if col not in ["data_pubblicazione", "year_week"]
-    ]
-    trend_melt = trend_filt.melt(
-        id_vars=["data_pubblicazione"],
-        value_vars=value_cols,
-        var_name="metrica",
-        value_name="valore",
+    # colori richiesti per started/closed; gli altri coerenti
+    color_scale = alt.Scale(
+        domain=["Started last 8 weeks", "Closed last 8 weeks", "Still open", "Still open Make"],
+        range=["#ff8800", "#008000", "#555555", "#2f6fed"],
     )
 
     chart = (
-        alt.Chart(trend_melt)
+        alt.Chart(melt)
         .mark_line(point=True)
         .encode(
-            x="data_pubblicazione:T",
-            y="valore:Q",
-            color="metrica:N",
-            tooltip=["data_pubblicazione:T", "metrica:N", "valore:Q"],
+            x=alt.X("week_start:T", title="Settimana (inizio)"),
+            y=alt.Y("value:Q", title="N° NC"),
+            color=alt.Color("metric:N", scale=color_scale, title="Metrica"),
+            tooltip=["week_start:T", "metric:N", "value:Q"],
         )
-        .properties(width="container", height=400)
+        .properties(height=420)
     )
 
     st.altair_chart(chart, use_container_width=True)
+
+    with st.expander("Dettaglio tabella"):
+        st.dataframe(out[["week_start", "Started last 8 weeks", "Closed last 8 weeks", "Still open", "Still open Make"]], width="stretch", hide_index=True)
+
+
+
 
 
 # ============================================================
@@ -2022,5 +2125,4 @@ if __name__ == "__main__":
             st.set_page_config(page_title="NC Management", layout="wide")
         except Exception:
             pass
-        st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace qui in chat.")
-        st.exception(e)
+        st.error("L'app si è int
