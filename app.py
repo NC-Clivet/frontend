@@ -14,14 +14,16 @@ except ImportError:
 # SECRETS / CONFIG
 # ============================================================
 
+from collections.abc import Mapping
+
 def secret_any(*paths, default=""):
-    # paths: lista di tuple tipo ("google","data_script_url") oppure ("data_script_url",)
+    # paths: tuple di chiavi, es: ("google","data_script_url") oppure ("DATA_SCRIPT_URL",)
     for path in paths:
         try:
             cur = st.secrets
             ok = True
             for p in path:
-                if isinstance(cur, dict) and p in cur:
+                if isinstance(cur, Mapping) and p in cur:
                     cur = cur[p]
                 else:
                     ok = False
