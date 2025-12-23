@@ -71,7 +71,18 @@ def _api_post(op: str, **body):
     if not j.get("ok"):
         raise RuntimeError(j.get("error", "API error"))
     return j.get("data")
+    
+def get_status_options_for_insert():
+    # per inserimento: Cancelled NON selezionabile
+    return ["New", "Managed", "Close"]
 
+def get_status_options_for_edit(existing_value: str | None = None):
+    base = ["New", "Managed", "Close"]
+    # Cancelled può esistere (solo se già presente)
+    if existing_value and str(existing_value).strip().lower() == "cancelled":
+        return base + ["Cancelled"]
+    return base
+    
 def _json_safe(v):
     try:
         if pd.isna(v):
@@ -132,6 +143,7 @@ def load_ac_data() -> pd.DataFrame:
     return df
 
 @st.cache_data(show_spinner=False)
+
 def load_platforms() -> list[str]:
     data = _api_get("list_platforms") or []
     out = [str(x).strip() for x in data if str(x).strip()]
@@ -275,16 +287,17 @@ def render_email_prompt():
                         "short_description": nc.get("short_description", ""),
                         "opened_by": nc.get("created_by", ""),
                         "owner": nc.get("owner", ""),
+                        "mob": nc.get("mob",""),
                         "responsibility": nc.get("responsibility", ""),
                         "nonconformance_status": nc.get("nonconformance_status", ""),
                         "piattaforma": nc.get("piattaforma", ""),
                     },
                     "ac_list": [
                         {
-                            "ac_corrective_action_num": a.get("ac_corrective_action_num", ""),
-                            "ac_short_description": a.get("ac_short_description", ""),
-                            "ac_owner": a.get("ac_owner", ""),
-                            "ac_request_status": a.get("ac_request_status", ""),
+                        "ac_corrective_action_num": a.get("AC_CORRECTIVE_ACTION_NUM","") or a.get("ac_corrective_action_num",""),
+                        "ac_short_description": a.get("AC_SHORT_DESCRIPTION","") or a.get("ac_short_description",""),
+                        "ac_owner": a.get("AC_OWNER","") or a.get("ac_owner",""),
+                        "ac_request_status": a.get("AC_REQUEST_STATUS","") or a.get("ac_request_status",""),
                         }
                         for a in (ac_list or [])
                     ]
@@ -413,9 +426,11 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
         piattaforma = st.selectbox("Piattaforma *", platforms) if platforms else st.text_input("Piattaforma *")
         short = st.text_input("Short description *")
         status = st.selectbox("Stato", ["New","Managed","Close","Cancelled"], index=0)
-        responsibility = st.selectbox("Responsabilità", ["R&D","Operation","Supplier","MKT","Other","Third party"], index=0)
+        RESP_OPTIONS = ["R&D", "Operation", "Supplier", "MKT", "Other", "Third party"]
+        responsibility = st.selectbox("Responsabilità", RESP_OPTIONS, index=0)
         owner = st.text_input("Owner")
         email = st.text_input("Email owner")
+        mob = st.selectbox("Make/Buy (MOB)", ["Make", "Buy"], index=0)
         mob = st.selectbox("Make/Buy", ["Make","Buy"], index=0)
         detailed = st.text_area("Detailed description")
         submitted = st.form_submit_button("💾 Crea NC")
@@ -461,12 +476,13 @@ def view_modifica(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         short = st.text_input("Short", value=str(nc_row.get("short_description","") or ""))
         status = st.selectbox("Stato", ["New","Managed","Close","Cancelled"],
                               index=max(0, ["New","Managed","Close","Cancelled"].index(str(nc_row.get("nonconformance_status","New")) if str(nc_row.get("nonconformance_status","New")) in ["New","Managed","Close","Cancelled"] else "New")))
-        responsibility = st.selectbox("Responsabilità", ["R&D","Operation","Supplier","MKT","Other","Third party"],
-                                      index=0)
+        RESP_OPTIONS = ["R&D", "Operation", "Supplier", "MKT", "Other", "Third party"]
+        responsibility = st.selectbox("Responsabilità", RESP_OPTIONS, index=0)
         owner = st.text_input("Owner", value=str(nc_row.get("owner","") or ""))
         email = st.text_input("Email", value=str(nc_row.get("email_address","") or ""))
         detailed = st.text_area("Detailed", value=str(nc_row.get("detailed_description","") or ""))
-        mob = st.selectbox("Make/Buy", ["Make","Buy"], index=0)
+        mob_cur = (row.get("mob") or "").strip()
+        mob = st.selectbox("Make/Buy (MOB)", ["Make","Buy"], index=0 if mob_cur!="Buy" else 1)
         save = st.form_submit_button("💾 Salva NC")
 
     if save:
