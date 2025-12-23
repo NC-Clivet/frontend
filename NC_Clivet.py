@@ -23,10 +23,9 @@ try:
 except ImportError:
     genai = None
 
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_API_KEY = st.secrets["gemini"]["api_key"]
-
-
+DATA_URL = st.secrets["google"]["data_script_url"]
+MAIL_URL = st.secrets["google"]["mail_script_url"]
+GEMINI_KEY = st.secrets["gemini"]["api_key"]
 
 # ============================================================
 # CONFIG
