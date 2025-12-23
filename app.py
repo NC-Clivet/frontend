@@ -35,6 +35,24 @@ def secret_any(*paths, default=""):
         except Exception:
             pass
     return default
+DATA_SCRIPT_URL = secret_any(
+    ("google", "data_script_url"),
+    ("DATA_SCRIPT_URL",),
+    ("data_script_url",),
+).split("?")[0]
+
+MAIL_SCRIPT_URL = secret_any(
+    ("google", "mail_script_url"),
+    ("MAIL_SCRIPT_URL",),
+    ("mail_script_url",),
+).split("?")[0]
+
+DATA_KEY = secret_any(
+    ("security", "data_api_key"),
+    ("DATA_API_KEY",),
+    ("data_api_key",),
+)
+
 
 DATA_SCRIPT_URL = secret_any(("google","data_script_url"), ("DATA_SCRIPT_URL",), ("data_script_url",), default="").split("?")[0]
 MAIL_SCRIPT_URL = secret_any(("google","mail_script_url"), ("MAIL_SCRIPT_URL",), ("mail_script_url",), default="").split("?")[0]
@@ -55,7 +73,8 @@ def _api_get(op: str, **params):
     q = {"op": op, **params}
     if DATA_KEY:
         q["key"] = DATA_KEY
-    r = requests.get(url, params=q, timeout=(5, 40), headers={"Accept": "application/json"})
+
+    r = requests.get(url, params=q, timeout=(5, 30), headers={"Accept": "application/json"})
     r.raise_for_status()
     j = r.json()
     if not j.get("ok"):
@@ -67,6 +86,7 @@ def _api_post(op: str, **body):
     payload = {"op": op, **body}
     if DATA_KEY:
         payload["key"] = DATA_KEY
+
     r = requests.post(url, json=payload, timeout=(5, 60), headers={"Accept": "application/json"})
     r.raise_for_status()
     j = r.json()
