@@ -204,8 +204,8 @@ def load_ac_data() -> pd.DataFrame:
     data = _api_get("list_ac") or []
     df = pd.DataFrame(data)
     df = _clean_cols(df)
-        if df.empty:
-            return pd.DataFrame(columns=["id","nc_id"])
+    if df.empty:
+        return pd.DataFrame(columns=["id","nc_id"])
     df = _rename_ci(df, AC_COLMAP)
     # date
     for c in ["ac_date_opened","ac_date_required","ac_end_date","ac_follow_up_date","created_at","updated_at"]:
