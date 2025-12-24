@@ -125,6 +125,52 @@ def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).replace("\u00a0", " ").strip() for c in df.columns]
     return df
 
+def _rename_ci(df: pd.DataFrame, mapping: dict[str, list[str]]) -> pd.DataFrame:
+    """Rinomina colonne in modo case-insensitive, prendendo la prima alternativa trovata."""
+    if df is None or df.empty:
+        return df
+    upper_map = {str(c).strip().upper(): c for c in df.columns}
+    ren = {}
+    for target, alts in mapping.items():
+        for a in alts:
+            k = str(a).strip().upper()
+            if k in upper_map:
+                ren[upper_map[k]] = target
+                break
+    return df.rename(columns=ren)
+
+
+NC_COLMAP = {
+    "nonconformance_number": ["nonconformance_number", "NONCONFORMANCE_NUMBER", "NC_NUMBER", "NC", "NONCONFORMANCE NO", "NONCONFORMANCE NUM"],
+    "nonconformance_status": ["nonconformance_status", "NONCONFORMANCE_STATUS", "STATUS"],
+    "date_opened": ["date_opened", "DATE_OPENED", "OPEN_DATE"],
+    "date_closed": ["date_closed", "DATE_CLOSED", "CLOSE_DATE"],
+    "piattaforma": ["piattaforma", "PIATTAFORMA", "PIATT.", "NEW_MACRO PIATTAFORMA", "MACRO PIATT.", "MACRO PIATTAF."],
+    "short_description": ["short_description", "SHORT_DESCRIPTION"],
+    "detailed_description": ["detailed_description", "DETAILED_DESCRIPTION"],
+    "owner": ["owner", "OWNER"],
+    "responsibility": ["responsibility", "RESPONSIBILITY"],
+    "nc_parent_ref": ["nc_parent_ref", "NC_PARENT_REF", "NC_PARENT_Y_N", "nc_parent_ref"],
+    "id": ["id", "ID"],
+    # se nel foglio NC hai anche Make/Buy:
+    "mob": ["mob", "MOB", "MAKE_OR_BUY", "MAKE BUY", "MAKE/BUY"],
+}
+
+AC_COLMAP = {
+    "id": ["id","ID"],
+    "nc_id": ["nc_id","NC_ID"],
+    "ac_corrective_action_num": ["ac_corrective_action_num","AC_CORRECTIVE_ACTION_NUM"],
+    "ac_request_status": ["ac_request_status","AC_REQUEST_STATUS"],
+    "ac_request_priority": ["ac_request_priority","AC_REQUEST_PRIORITY"],
+    "ac_date_opened": ["ac_date_opened","AC_DATE_OPENED"],
+    "ac_date_required": ["ac_date_required","AC_DATE_REQUIRED"],
+    "ac_end_date": ["ac_end_date","AC_END_DATE"],
+    "ac_follow_up_date": ["ac_follow_up_date","AC_FOLLOW_UP_DATE"],
+    "ac_owner": ["ac_owner","AC_OWNER"],
+    "ac_email_address": ["ac_email_address","AC_EMAIL_ADDRESS"],
+    "ac_short_description": ["ac_short_description","AC_SHORT_DESCRIPTION"],
+    "ac_detailed_description": ["ac_detailed_description","AC_DETAILED_DESCRIPTION"],
+}
 @st.cache_data(show_spinner=False)
 def load_nc_data() -> pd.DataFrame:
     data = _api_get("list_nc") or []
@@ -132,17 +178,25 @@ def load_nc_data() -> pd.DataFrame:
     df = _clean_cols(df)
     if df.empty:
         return df
+
+    # ✅ NORMALIZZA NOMI COLONNE (questa è la parte che manca)
+    df = _rename_ci(df, NC_COLMAP)
+
     # date
     for c in ["date_opened", "date_closed", "created_at", "updated_at"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
+
     # id string
     if "id" in df.columns:
         df["id"] = df["id"].astype(str).str.strip()
+
+    # se id manca o è vuoto, usa nonconformance_number
     if "nonconformance_number" in df.columns:
         df["nonconformance_number"] = df["nonconformance_number"].astype(str).str.strip()
         if "id" not in df.columns or df["id"].eq("").all():
             df["id"] = df["nonconformance_number"]
+
     return df
 
 @st.cache_data(show_spinner=False)
@@ -150,8 +204,9 @@ def load_ac_data() -> pd.DataFrame:
     data = _api_get("list_ac") or []
     df = pd.DataFrame(data)
     df = _clean_cols(df)
-    if df.empty:
-        return pd.DataFrame(columns=["nc_id", "id"])
+        if df.empty:
+            return pd.DataFrame(columns=["id","nc_id"])
+    df = _rename_ci(df, AC_COLMAP)
     # date
     for c in ["ac_date_opened","ac_date_required","ac_end_date","ac_follow_up_date","created_at","updated_at"]:
         if c in df.columns:
