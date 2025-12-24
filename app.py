@@ -694,9 +694,10 @@ DATI:
 
 def main():
     st.set_page_config(page_title="NC Management", layout="wide")
-    st.sidebar.title("Menu")
-    choice = st.sidebar.radio("Sezione", ["Lista", "Consulta", "Modifica", "Nuova NC", "Piattaforme"])
-
+    scelta = st.sidebar.radio(
+        "Sezione",
+        ("Lista", "Consulta", "Modifica", "Nuova NC", "Trend", "Piattaforme"),
+    )
     try:
         df_nc = load_nc_data()
         df_ac = load_ac_data()
@@ -711,16 +712,18 @@ def main():
         st.write("NC:", len(df_nc))
         st.write("AC:", len(df_ac))
 
-    if choice == "Lista":
-        view_lista(df_nc, df_ac)
-    elif choice == "Consulta":
-        view_consulta(df_nc, df_ac)
-    elif choice == "Modifica":
-        view_modifica(df_nc, df_ac)
-    elif choice == "Nuova NC":
-        view_inserisci_nc(df_nc)
-    elif choice == "Piattaforme":
-        st.header("🧩 Piattaforme")
+        if scelta == "Lista":
+            view_lista(df_nc, df_ac)
+        elif scelta == "Consulta":
+            view_consulta_nc(df_nc, df_ac)
+        elif scelta == "Modifica":
+            view_modifica_nc(df_nc, df_ac)
+        elif scelta == "Nuova NC":
+            view_inserisci_nc(df_nc)
+        elif scelta == "Trend":
+            view_trend_nc_quality_db(df_nc)   # oppure la tua view grafico nuova “last 8 weeks”
+        elif scelta == "Piattaforme":
+            view_gestione_piattaforme()
         plats = load_platforms()
         st.dataframe(pd.DataFrame({"Piattaforma": plats}), width="stretch", hide_index=True)
 
