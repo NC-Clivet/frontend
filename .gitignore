@@ -1,5 +1,7 @@
 # Streamlit secrets (NON committare)
 .streamlit/secrets.toml
+# Certicati per Nginx
+certs/
 
 # Python
 __pycache__/
@@ -10,4 +12,5 @@ venv/
 
 # OS
 .DS_Store
+
 Thumbs.db
