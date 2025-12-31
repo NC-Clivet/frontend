@@ -231,6 +231,78 @@ def _api_get(op: str, **params):
     if not j.get('ok'):
         raise RuntimeError(j.get('error', 'API error'))
     return j.get('data')
+NC_TO_SHEET = {
+    "id": "ID",
+    "nonconformance_number": "NONCONFORMANCE_NUMBER",
+    "nonconformance_status": "NONCONFORMANCE_STATUS",
+    "nc_parent_y_n": "NC_PARENT_Y_N",
+    "nc_parent_ref": "NC_PARENT_REF",
+    "date_opened": "DATE_OPENED",
+    "nonconformance_source": "NONCONFORMANCE_SOURCE",
+    "service_request": "SERVICE_REQUEST",
+    "incident_type": "INCIDENT_TYPE",
+    "item_instance_serial": "ITEM_INSTANCE_SERIAL",
+    "item_id": "ITEM_ID",
+    "item": "ITEM",
+    "serie": "SERIE",
+    "grandezza": "GRANDEZZA",
+    "piattaforma": "PIATTAFORMA",
+    "macro_piattaforma": "MACRO PIATTAFORMA",   # o "MACRO PIATT." se è quello reale
+    "mob": "MOB",
+    "short_description": "SHORT_DESCRIPTION",
+    "detailed_description": "DETAILED_DESCRIPTION",
+    "nonconform_priority": "NONCONFORM_PRIORITY",
+    "item_desc": "ITEM_DESC",
+    "supplier": "SUPPLIER",
+    "created_by": "ENTERED_BY_USER",
+    "owner": "OWNER",
+    "email_address": "EMAIL_ADDRESS",
+    "send_email": "SEND_EMAIL",
+    "date_closed": "DATE_CLOSED",
+    "quantity_nonconforming": "QUANTITY_NONCONFORMING",
+    "nonconforming_uom": "NONCONFORMING_UOM",
+    "days_to_close": "DAYS_TO_CLOSE",
+    "cost_smry_internal": "COST_SMRY_INTERNAL",
+    "cost_smry_customer": "COST_SMRY_CUSTOMER",
+    "responsibility": "RESPONSIBILITY",
+    "det_problem_description": "DET_PROBLEM_DESCRIPTION",
+    "det_cause": "DET_CAUSE",
+    "det_close": "DET_CLOSE",
+}
+
+AC_TO_SHEET = {
+    "id": "ID",
+    "nc_id": "nc_id",  # qui dipende: se nel foglio AC è proprio "nc_id" lascialo così; se è "NC_ID" metti "NC_ID"
+    "ac_corrective_action_num": "AC_CORRECTIVE_ACTION_NUM",
+    "ac_request_source": "AC_REQUEST_SOURCE",
+    "ac_implementation_type": "AC_IMPLEMENTATION_TYPE",
+    "ac_date_opened": "AC_DATE_OPENED",
+    "ac_requestor": "AC_REQUESTOR",
+    "ac_owner": "AC_OWNER",
+    "ac_send_email": "AC_SEND_EMAIL",
+    "ac_email_address": "AC_EMAIL_ADDRESS",
+    "ac_short_description": "AC_SHORT_DESCRIPTION",
+    "ac_request_priority": "AC_REQUEST_PRIORITY",
+    "ac_date_required": "AC_DATE_REQUIRED",
+    "ac_detailed_description": "AC_DETAILED_DESCRIPTION",
+    "ac_cost_smry_internal": "AC_COST_SMRY_INTERNAL",
+    "ac_end_date": "AC_END_DATE",
+    "ac_effective": "AC_EFFECTIVE",
+    "ac_evidence_verify": "AC_EVIDENCE_VERIFY",
+    "ac_follow_up_date": "AC_FOLLOW_UP_DATE",
+    "ac_request_status": "AC_REQUEST_STATUS",
+    "ac_days_to_close": "AC_DAYS_TO_CLOSE",
+    "ac_car_class": "AC_CAR_CLASS",
+    "new_macro_piattaforma": "NEW_MACRO PIATTAFORMA",
+}
+
+def _to_sheet_keys(d: dict, mapping: dict) -> dict:
+    out = {}
+    for k, v in (d or {}).items():
+        kk = mapping.get(k, k)   # se non mappato, lo lascia invariato
+        out[kk] = v
+    return out
+
 
 def _api_post(op: str, **body):
     url = DATA_SCRIPT_URL
@@ -413,32 +485,72 @@ def load_ac_data() -> pd.DataFrame:
         return re.sub(r"\s+", " ", c).strip()
     df.columns = [_clean(c) for c in df.columns]
     df = _dedup_columns(df)
-    oracle_ac_map = {
-        'ID':'id', 'NC_ID':'nc_id',
-        'AC_CORRECTIVE_ACTION_NUM':'ac_corrective_action_num',
-        'AC_REQUEST_STATUS':'ac_request_status',
-        'AC_REQUEST_PRIORITY':'ac_request_priority',
-        'AC_DATE_OPENED':'ac_date_opened',
-        'AC_DATE_REQUIRED':'ac_date_required',
-        'AC_END_DATE':'ac_end_date',
-        'AC_FOLLOW_UP_DATE':'ac_follow_up_date',
-        'AC_OWNER':'ac_owner',
-        'AC_EMAIL_ADDRESS':'ac_email_address',
-        'AC_SHORT_DESCRIPTION':'ac_short_description',
-        'AC_DETAILED_DESCRIPTION':'ac_detailed_description',
-        'AC_EFFECTIVE':'ac_effective',
-        'AC_EVIDENCE_VERIFY':'ac_evidence_verify',
-        'PIATTAFORMA':'piattaforma',
-    }
-    ren = {k:v for k,v in oracle_ac_map.items() if k in df.columns}
+
+    # normalizza intestazioni (spazi, punti, ecc.)
+    def _norm_key(s: str) -> str:
+        s = str(s or "").upper().strip()
+        s = s.replace(" ", "_").replace(".", "")
+        s = re.sub(r"[^A-Z0-9_]+", "_", s)
+        s = re.sub(r"_+", "_", s).strip("_")
+        return s
+
+    norm_cols = {_norm_key(c): c for c in df.columns}
+
+    def _rename_if_exists(norm_name: str, new_name: str, ren: dict):
+        if norm_name in norm_cols:
+            ren[norm_cols[norm_name]] = new_name
+
+    ren = {}
+
+    # chiavi / collegamento NC
+    _rename_if_exists("ID", "id", ren)
+    _rename_if_exists("NC_ID", "nc_id", ren)
+
+    # campi AC (nuovi fogli separati)
+    _rename_if_exists("AC_CORRECTIVE_ACTION_NUM", "ac_corrective_action_num", ren)
+    _rename_if_exists("AC_REQUEST_SOURCE", "ac_request_source", ren)
+    _rename_if_exists("AC_IMPLEMENTATION_TYPE", "ac_implementation_type", ren)
+    _rename_if_exists("AC_DATE_OPENED", "ac_date_opened", ren)
+    _rename_if_exists("AC_REQUESTOR", "ac_requestor", ren)
+    _rename_if_exists("AC_OWNER", "ac_owner", ren)
+    _rename_if_exists("AC_SEND_EMAIL", "ac_send_email", ren)
+    _rename_if_exists("AC_EMAIL_ADDRESS", "ac_email_address", ren)
+    _rename_if_exists("AC_SHORT_DESCRIPTION", "ac_short_description", ren)
+    _rename_if_exists("AC_REQUEST_PRIORITY", "ac_request_priority", ren)
+    _rename_if_exists("AC_DATE_REQUIRED", "ac_date_required", ren)
+    _rename_if_exists("AC_DETAILED_DESCRIPTION", "ac_detailed_description", ren)
+    _rename_if_exists("AC_COST_SMRY_INTERNAL", "ac_cost_smry_internal", ren)
+    _rename_if_exists("AC_END_DATE", "ac_end_date", ren)
+    _rename_if_exists("AC_EFFECTIVE", "ac_effective", ren)
+    _rename_if_exists("AC_EVIDENCE_VERIFY", "ac_evidence_verify", ren)
+    _rename_if_exists("AC_FOLLOW_UP_DATE", "ac_follow_up_date", ren)
+    _rename_if_exists("AC_REQUEST_STATUS", "ac_request_status", ren)
+    _rename_if_exists("AC_DAYS_TO_CLOSE", "ac_days_to_close", ren)
+    _rename_if_exists("AC_CAR_CLASS", "ac_car_class", ren)
+    _rename_if_exists("NEW_MACRO_PIATTAFORMA", "new_macro_piattaforma", ren)
+    _rename_if_exists("NEW_MACRO_PIATTAFORMA_", "new_macro_piattaforma", ren)  # tolleranza
+
+    # compatibilità vecchia colonna piattaforma (se presente)
+    _rename_if_exists("PIATTAFORMA", "piattaforma", ren)
+
     if ren:
         df = df.rename(columns=ren)
+
+    df = _dedup_columns(df)
+
+    # date parsing
     for col in ['ac_date_opened','ac_date_required','ac_end_date','ac_follow_up_date','created_at','updated_at']:
         if col in df.columns:
             df[col] = df[col].apply(_parse_any_date)
+
+    # coerci id
+    if 'id' not in df.columns and 'ac_corrective_action_num' in df.columns:
+        df['id'] = df['ac_corrective_action_num'].astype(str).str.strip()
+
     for c in ['id','nc_id']:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
+
     return df
 
 @st.cache_data(show_spinner=False)
@@ -490,23 +602,26 @@ def _serialize_dict(d: dict) -> dict:
     return {k: _json_safe(v) for k,v in (d or {}).items()}
 
 def insert_nc_in_db(values: dict) -> str:
-    out = _api_post("create_nc", payload=_serialize_dict(values))
+    payload = _to_sheet_keys(values, NC_TO_SHEET)
+    out = _api_post("create_nc", payload=_serialize_dict(payload))
     load_nc_data.clear(); load_ac_data.clear()
     return str(out.get('id','')) if isinstance(out, dict) else ""
 
 def update_nc_in_db(nc_id: str, values: dict):
-    _api_post("update_nc", id=str(nc_id), patch=_serialize_dict(values))
+    patch = _to_sheet_keys(values, NC_TO_SHEET)
+    _api_post("update_nc", id=str(nc_id), patch=_serialize_dict(patch))
     load_nc_data.clear(); load_ac_data.clear()
 
 def insert_ac_in_db(nc_id: str, values: dict):
     payload = {"nc_id": str(nc_id)}
     payload.update(values or {})
+    payload = _to_sheet_keys(payload, AC_TO_SHEET)
     _api_post("create_ac", payload=_serialize_dict(payload))
     load_ac_data.clear()
 
 def update_ac_in_db(nc_id: str, ac_id: str, values: dict):
-    patch = _serialize_dict(values)
-    _api_post("update_ac", id=str(ac_id), patch=patch)
+    patch = _to_sheet_keys(values, AC_TO_SHEET)
+    _api_post("update_ac", id=str(ac_id), patch=_serialize_dict(patch))
     load_ac_data.clear()
 
 # ============================================================
@@ -1044,253 +1159,455 @@ def get_status_options(df_nc: pd.DataFrame):
         if v not in base: base.append(v)
     return base
 
+def _truthy_flag(v) -> bool:
+    s = str(v or "").strip().upper()
+    return s in ("Y","YES","TRUE","1","SI","SÌ")
+
+
+def get_next_nc_number(df_nc: pd.DataFrame, prefix="NC", suffix="CVT", width=4) -> str:
+    if df_nc is None or df_nc.empty:
+        return f"{prefix}-{str(1).zfill(width)}-{suffix}"
+
+    col = None
+    for candidate in ["nonconformance_number", "NONCONFORMANCE_NUMBER"]:
+        if candidate in df_nc.columns:
+            col = candidate
+            break
+    if not col:
+        return f"{prefix}-{str(1).zfill(width)}-{suffix}"
+
+    series = df_nc[col].astype(str).fillna("").str.strip()
+    rx = re.compile(rf"^{prefix}[\s\-]*?(\d+)[\s\-]*?{suffix}$", re.IGNORECASE)
+
+    max_n = 0
+    for s in series:
+        s2 = s.replace("\u00a0", " ").strip()
+        m = rx.match(s2)
+        if m:
+            try:
+                n = int(m.group(1))
+                max_n = max(max_n, n)
+            except:
+                pass
+
+    next_n = max_n + 1 if max_n > 0 else 1
+    return f"{prefix}-{str(next_n).zfill(width)}-{suffix}"
+
+
+def get_next_ac_number(df_ac: pd.DataFrame, prefix="AC", suffix="CVT", width=4) -> str:
+    if df_ac is None or df_ac.empty:
+        return f"{prefix}-{str(1).zfill(width)}-{suffix}"
+
+    # prova più nomi possibili della colonna
+    col = None
+    for candidate in ["ac_corrective_action_num", "AC_CORRECTIVE_ACTION_NUM", "ac_number"]:
+        if candidate in df_ac.columns:
+            col = candidate
+            break
+    if not col:
+        return f"{prefix}-{str(1).zfill(width)}-{suffix}"
+
+    series = df_ac[col].astype(str).fillna("")
+
+    # regex più tollerante: cerca AC ... numero ... CVT ovunque nella stringa
+    rx = re.compile(rf"\b{re.escape(prefix)}[\s\-]*?(\d+)[\s\-]*?{re.escape(suffix)}\b", re.IGNORECASE)
+
+    max_n = 0
+    for s in series:
+        s2 = str(s)
+
+        # normalizzazioni Google Sheets / Unicode
+        s2 = s2.replace("\u00a0", " ").strip()     # NBSP
+        s2 = s2.lstrip("'").strip()                # apostrofo iniziale
+        s2 = s2.replace("–", "-").replace("—", "-").replace("-", "-").replace("−", "-")  # trattini unicode
+        s2 = re.sub(r"\s+", " ", s2)               # spazi multipli
+
+        m = rx.search(s2)
+        if m:
+            try:
+                n = int(m.group(1))
+                if n > max_n:
+                    max_n = n
+            except ValueError:
+                pass
+
+    next_n = max_n + 1 if max_n > 0 else 1
+    return f"{prefix}-{str(next_n).zfill(width)}-{suffix}"
+
+def render_nc_form(df_nc: pd.DataFrame, defaults: dict | None = None, mode: str = "create") -> dict:
+    """Rende la UI della NC (create/edit) e ritorna un dict pronto per il backend."""
+    defaults = defaults or {}
+    today = date.today()
+
+    def D(key, fallback=""):
+        v = defaults.get(key, fallback)
+        return "" if v is None else v
+
+    all_status = get_status_options(df_nc) if df_nc is not None and not df_nc.empty else ['OPEN','CLOSED','CANCELLED']
+    status_options = [s for s in all_status if s.upper() != 'CANCELLED'] or ['OPEN','CLOSED']
+
+    # Numero NC
+    if mode == "create":
+        nc_number = get_next_nc_number(df_nc)
+        date_opened = today
+        cur_status = 'OPEN'
+    else:
+        nc_number = str(D('nonconformance_number', D('id',''))).strip()
+        date_opened = safe_date_for_input(D('date_opened')) or today
+        cur_status = str(D('nonconformance_status','OPEN')).strip() or 'OPEN'
+        if cur_status not in status_options:
+            status_options = [cur_status] + status_options
+
+    st.subheader("1) Identità NC")
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+    with c1:
+        st.text_input("Numero NC", value=nc_number, disabled=True)
+    with c2:
+        status = st.selectbox("Stato NC", options=status_options, index=status_options.index(cur_status))
+    with c3:
+        nonconform_priority = st.text_input("Priorità NC", value=str(D('nonconform_priority','')))
+    with c4:
+        st.text_input("Data apertura", value=str(date_opened), disabled=True)
+
+    p1, p2 = st.columns([0.9, 2.1])
+    with p1:
+        is_child = st.checkbox("NC derivata da altra NC (Parent)?", value=_truthy_flag(D('nc_parent_y_n')))
+    with p2:
+        nc_parent_ref = st.text_input("Riferimento NC padre", value=str(D('nc_parent_ref','')), disabled=(not is_child))
+
+    st.subheader("2) Contesto prodotto")
+    a1, a2, a3, a4 = st.columns([1, 1, 1, 1])
+    with a1:
+        serie = st.text_input("Serie *", value=str(D('serie','')))
+    with a2:
+        grandezza = st.text_input("Grandezza", value=str(D('grandezza','')))
+    with a3:
+        item_instance_serial = st.text_input("Matricola / Serial", value=str(D('item_instance_serial','')))
+    with a4:
+        mob_cur = (str(D('mob','')) or '').strip()
+        mob = st.selectbox("Make/Buy (MOB)", ['Make','Buy'], index=0 if mob_cur != 'Buy' else 1)
+
+    b1, b2, b3 = st.columns([1.3, 1.3, 1.1])
+    with b1:
+        platforms = load_platforms()
+        if platforms:
+            cur_pl = str(D('piattaforma', platforms[0] if platforms else '')).strip()
+            idx = platforms.index(cur_pl) if cur_pl in platforms else 0
+            piattaforma = st.selectbox("Piattaforma *", options=platforms, index=idx)
+        else:
+            piattaforma = st.text_input("Piattaforma * (nessuna piattaforma definita)", value=str(D('piattaforma','')))
+    with b2:
+        macro_piattaforma = st.text_input("Macro piattaforma", value=str(D('macro_piattaforma','')))
+    with b3:
+        item_id = st.text_input("Item ID", value=str(D('item_id','')))
+
+    c5, c6 = st.columns([1.2, 2.8])
+    with c5:
+        item = st.text_input("Item", value=str(D('item','')))
+    with c6:
+        item_desc = st.text_input("Item descrizione", value=str(D('item_desc','')))
+
+    st.subheader("3) Origine evento")
+    o1, o2, o3, o4 = st.columns(4)
+    with o1:
+        nonconformance_source = st.text_input("Fonte (source)", value=str(D('nonconformance_source','')))
+    with o2:
+        incident_type = st.text_input("Incident type", value=str(D('incident_type','')))
+    with o3:
+        service_request = st.text_input("Service request / Ticket", value=str(D('service_request','')))
+    with o4:
+        supplier = st.text_input("Supplier", value=str(D('supplier','')))
+
+    q1, q2 = st.columns(2)
+    with q1:
+        quantity_nonconforming = st.text_input("Quantità non conforme", value=str(D('quantity_nonconforming','')))
+    with q2:
+        nonconforming_uom = st.text_input("UoM", value=str(D('nonconforming_uom','')))
+
+    st.subheader("4) Owner e descrizione")
+    h1, h2, h3 = st.columns([1.2, 1.2, 1.0])
+    with h1:
+        owner = st.text_input("Owner NC", value=str(D('owner','')))
+    with h2:
+        email_address = st.text_input("Email owner", value=str(D('email_address','')))
+    with h3:
+        responsibility = st.text_input("Responsabilità", value=str(D('responsibility','')))
+
+    short_description = st.text_input("Short description *", value=str(D('short_description','')))
+    detailed_description = st.text_area("Descrizione dettagliata", value=str(D('detailed_description','')), height=140)
+
+    st.subheader("5) Dettagli di chiusura (Analisi DET_*)")
+    det_problem_description = st.text_area("Problem description (DET_*)", value=str(D('det_problem_description','')), height=110)
+    det_cause = st.text_area("Cause (DET_CAUSE)", value=str(D('det_cause','')), height=110)
+    det_close = st.text_area("Chiusura (DET_CLOSE)", value=str(D('det_close','')), height=110)
+
+    # autocorrezione email da owner
+    owner_clean = owner.strip()
+    email_clean = str(email_address or '').strip()
+    if not email_clean and owner_clean:
+        sug = suggest_email_from_name(owner_clean)
+        if sug:
+            email_clean = sug
+
+    vals = {
+        'nonconformance_number': nc_number,
+        'date_opened': date_opened.isoformat() if date_opened else None,
+        'nonconformance_status': (status or '').strip() or None,
+        'nonconform_priority': (nonconform_priority or '').strip() or None,
+
+        'nc_parent_y_n': 'Y' if is_child else 'N',
+        'nc_parent_ref': (nc_parent_ref or '').strip() if is_child else None,
+
+        'serie': (serie or '').strip(),
+        'grandezza': (grandezza or '').strip() or None,
+        'item_instance_serial': (item_instance_serial or '').strip() or None,
+        'mob': mob,
+
+        'piattaforma': (piattaforma or '').strip(),
+        'macro_piattaforma': (macro_piattaforma or '').strip() or None,
+        'item_id': (item_id or '').strip() or None,
+        'item': (item or '').strip() or None,
+        'item_desc': (item_desc or '').strip() or None,
+
+        'nonconformance_source': (nonconformance_source or '').strip() or None,
+        'incident_type': (incident_type or '').strip() or None,
+        'service_request': (service_request or '').strip() or None,
+        'supplier': (supplier or '').strip() or None,
+        'quantity_nonconforming': (quantity_nonconforming or '').strip() or None,
+        'nonconforming_uom': (nonconforming_uom or '').strip() or None,
+
+        'responsibility': (responsibility or '').strip() or None,
+        'owner': owner_clean or None,
+        'email_address': email_clean or None,
+
+        'short_description': (short_description or '').strip(),
+        'detailed_description': detailed_description or None,
+
+        'det_problem_description': det_problem_description or None,
+        'det_cause': det_cause or None,
+        'det_close': det_close or None,
+    }
+    return vals
+
+def render_ac_form(defaults: dict | None = None, mode: str = "create", proposed_code: str | None = None) -> dict:
+    """Rende la UI della AC (create/edit) e ritorna un dict pronto per il backend."""
+    defaults = defaults or {}
+    today = date.today()
+
+    def D(key, fallback=""):
+        v = defaults.get(key, fallback)
+        return "" if v is None else v
+
+    st.subheader("1) Identità AC")
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+    with c1:
+        ac_num_val = str(D('ac_corrective_action_num', D('ac_number',''))).strip() or (proposed_code or "")
+        st.text_input("AC number", value=ac_num_val, disabled=(mode=="edit" or bool(proposed_code)))
+    with c2:
+        ac_request_status = st.text_input("Stato AC", value=str(D('ac_request_status','OPEN')) or "OPEN")
+    with c3:
+        ac_request_priority = st.text_input("Priorità AC", value=str(D('ac_request_priority','')))
+    with c4:
+        st.text_input("Data apertura", value=str(D('ac_date_opened', today)), disabled=True)
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        ac_date_required = st.text_input("Data richiesta", value=str(D('ac_date_required','')))
+    with d2:
+        ac_end_date = st.text_input("Data fine", value=str(D('ac_end_date','')))
+    with d3:
+        ac_follow_up_date = st.text_input("Follow-up", value=str(D('ac_follow_up_date','')))
+
+    st.subheader("2) Owner / email / source")
+    o1, o2, o3, o4 = st.columns([1.2, 1.4, 0.9, 1.2])
+    with o1:
+        ac_owner = st.text_input("Owner AC", value=str(D('ac_owner','')))
+    with o2:
+        ac_email_address = st.text_input("Email owner", value=str(D('ac_email_address','')))
+    with o3:
+        ac_send_email = st.checkbox("Invia email", value=_truthy_flag(D('ac_send_email')))
+    with o4:
+        ac_requestor = st.text_input("Requestor", value=str(D('ac_requestor','')))
+
+    # Short subito sotto
+    ac_short_description = st.text_input("Short description *", value=str(D('ac_short_description','')))
+    ac_detailed_description = st.text_area("Descrizione dettagliata", value=str(D('ac_detailed_description','')), height=140)
+
+    st.subheader("3) Classificazione / tipo")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        ac_request_source = st.text_input("Request source", value=str(D('ac_request_source','')))
+    with s2:
+        ac_implementation_type = st.text_input("Implementation type", value=str(D('ac_implementation_type','')))
+    with s3:
+        ac_car_class = st.text_input("CAR class", value=str(D('ac_car_class','')))
+
+    st.subheader("4) Costi / piattaforma")
+    k1, k2 = st.columns(2)
+    with k1:
+        ac_cost_smry_internal = st.text_input("Costo interno (smry)", value=str(D('ac_cost_smry_internal','')))
+    with k2:
+        new_macro_piattaforma = st.text_input("New macro piattaforma", value=str(D('new_macro_piattaforma','')))
+
+    st.subheader("5) Chiusura AC")
+    ac_effective = st.text_area("Efficacia (AC_EFFECTIVE)", value=str(D('ac_effective','')), height=90)
+    ac_evidence_verify = st.text_area("Evidenze (AC_EVIDENCE_VERIFY)", value=str(D('ac_evidence_verify','')), height=90)
+
+    # autocorrezione email da owner
+    owner_clean = ac_owner.strip()
+    email_clean = str(ac_email_address or '').strip()
+    if not email_clean and owner_clean:
+        sug = suggest_email_from_name(owner_clean)
+        if sug:
+            email_clean = sug
+
+    vals = {
+        'ac_corrective_action_num': ac_num_val.strip() or None,
+        'ac_request_status': (ac_request_status or '').strip() or None,
+        'ac_request_priority': (ac_request_priority or '').strip() or None,
+
+        'ac_date_required': (ac_date_required or '').strip() or None,
+        'ac_end_date': (ac_end_date or '').strip() or None,
+        'ac_follow_up_date': (ac_follow_up_date or '').strip() or None,
+
+        'ac_requestor': (ac_requestor or '').strip() or None,
+        'ac_owner': owner_clean or None,
+        'ac_email_address': email_clean or None,
+        'ac_send_email': 'Y' if ac_send_email else 'N',
+
+        'ac_short_description': (ac_short_description or '').strip(),
+        'ac_detailed_description': ac_detailed_description or None,
+
+        'ac_request_source': (ac_request_source or '').strip() or None,
+        'ac_implementation_type': (ac_implementation_type or '').strip() or None,
+        'ac_car_class': (ac_car_class or '').strip() or None,
+
+        'ac_cost_smry_internal': (ac_cost_smry_internal or '').strip() or None,
+        'new_macro_piattaforma': (new_macro_piattaforma or '').strip() or None,
+
+        'ac_effective': ac_effective or None,
+        'ac_evidence_verify': ac_evidence_verify or None,
+    }
+    return vals
+
 def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
     st.header('✏️ Modifica NC / AC')
     if df_nc.empty:
         st.warning('Nessuna NC presente nel database.')
         return
-    status_options = get_status_options(df_nc)
-    nc_numbers = sorted(df_nc['nonconformance_number'].dropna().unique().tolist())
+
+    nc_numbers = sorted(df_nc['nonconformance_number'].dropna().astype(str).unique().tolist())
     selected_nc = st.selectbox('Seleziona NC', nc_numbers)
-    row = df_nc[df_nc['nonconformance_number'] == selected_nc]
-    if row.empty:
+    row_df = df_nc[df_nc['nonconformance_number'].astype(str) == str(selected_nc)]
+    if row_df.empty:
         st.error('NC non trovata.')
         return
-    row = row.iloc[0]
-    nc_id = str(row['id']).strip()
+    row = row_df.iloc[0]
+    nc_id = str(row.get('id') or row.get('nonconformance_number') or '').strip()
 
     st.subheader('Dati NC')
-    with st.form(key='form_modifica_nc'):
-        serie = st.text_input('Serie', value=row.get('serie') or '')
-        platforms = load_platforms()
-        if platforms:
-            current = row.get('piattaforma') or (platforms[0] if platforms else '')
-            piattaforma = st.selectbox('Piattaforma *', platforms, index=max(0, platforms.index(current)) if current in platforms else 0)
-        else:
-            piattaforma = st.text_input('Piattaforma * (nessuna piattaforma definita a sistema)', value=row.get('piattaforma') or '')
-        short_description = st.text_input('Short description', value=row.get('short_description') or '')
-        current_status = row.get('nonconformance_status') or 'OPEN'
-        if current_status not in status_options:
-            status_options = [current_status] + status_options
-        status = st.selectbox('Stato NC', options=status_options, index=status_options.index(current_status))
-        nonconform_priority = st.text_input('Priorità NC', value=row.get('nonconform_priority') or '')
-        responsibility = st.text_input('Responsabilità', value=row.get('responsibility') or '')
-        owner = st.text_input('Owner NC', value=row.get('owner') or '')
-        email_address = st.text_input('Email owner NC', value=row.get('email_address') or '')
-        nonconformance_source = st.text_input('Fonte NC (source)', value=row.get('nonconformance_source') or '')
-        incident_type = st.text_input('Incident type', value=row.get('incident_type') or '')
-        c1,c2 = st.columns(2)
-        with c1:
-            d_open = safe_date_for_input(row.get('date_opened'))
-            date_opened = st.date_input('Data apertura', value=d_open or date.today())
-        with c2:
-            d_close = safe_date_for_input(row.get('date_closed'))
-            has_close = st.checkbox('Data chiusura impostata', value=(d_close is not None), key=f"has_date_closed_{nc_id}")
-            if has_close:
-                date_closed = st.date_input('Data chiusura', value=(d_close or date.today()), key=f"date_closed_{nc_id}")
-            else:
-                date_closed = None
-                st.caption('Data chiusura: —')
-        detailed_description = st.text_area('Descrizione dettagliata', value=row.get('detailed_description') or '')
-        det_problem_description = st.text_area('Problem description (DET_)', value=row.get('det_problem_description') or '')
-        det_cause = st.text_area('Cause (DET_CAUSE)', value=row.get('det_cause') or '')
-        det_close = st.text_area('Chiusura (DET_CLOSE)', value=row.get('det_close') or '')
-        mob_cur = (row.get('mob') or '').strip()
-        mob = st.selectbox('Make/Buy (MOB)', ['Make','Buy'], index=0 if mob_cur != 'Buy' else 1)
+    with st.form(key='form_modifica_nc_levels'):
+        vals = render_nc_form(df_nc=df_nc, defaults=row.to_dict(), mode="edit")
         submitted_nc = st.form_submit_button('💾 Salva modifiche NC')
-        if submitted_nc:
-            errors = []
-            if not (serie or '').strip(): errors.append('SERIE è obbligatoria.')
-            if not (piattaforma or '').strip(): errors.append('PIATTAFORMA è obbligatoria.')
-            if not (short_description or '').strip(): errors.append('SHORT_DESCRIPTION è obbligatoria.')
-            if errors:
-                for e in errors: st.error(e)
-            else:
-                owner_clean = owner.strip(); email_clean = email_address.strip()
-                if not email_clean and owner_clean:
-                    sug = suggest_email_from_name(owner_clean)
-                    if sug: email_clean = sug
-                vals = {
-                    'serie': serie.strip(), 'piattaforma': (piattaforma or '').strip(), 'short_description': (short_description or '').strip(),
-                    'nonconformance_status': (status or '').strip(), 'nonconform_priority': (nonconform_priority or '').strip() or None,
-                    'responsibility': (responsibility or '').strip() or None, 'owner': owner_clean or None, 'email_address': email_clean or None,
-                    'nonconformance_source': (nonconformance_source or '').strip() or None, 'incident_type': (incident_type or '').strip() or None,
-                    'date_opened': date_opened.isoformat() if date_opened else None, 'date_closed': date_closed.isoformat() if date_closed else None,
-                    'detailed_description': detailed_description or None, 'det_problem_description': det_problem_description or None,
-                    'det_cause': det_cause or None, 'det_close': det_close or None, 'mob': mob,
-                }
-                update_nc_in_db(nc_id, vals)
-                st.success('NC aggiornata con successo.')
-                trigger_email_prompt(nc_id, 'Modifica dati NC')
+
+    if submitted_nc:
+        errors = []
+        if not (vals.get('serie') or '').strip(): errors.append('SERIE è obbligatoria.')
+        if not (vals.get('piattaforma') or '').strip(): errors.append('PIATTAFORMA è obbligatoria.')
+        if not (vals.get('short_description') or '').strip(): errors.append('SHORT_DESCRIPTION è obbligatoria.')
+        if errors:
+            for e in errors: st.error(e)
+        else:
+            # in modifica non vogliamo cambiare il numero NC
+            vals_patch = dict(vals)
+            vals_patch.pop('nonconformance_number', None)
+            update_nc_in_db(nc_id, vals_patch)
+            st.success('NC aggiornata con successo.')
+            trigger_email_prompt(nc_id, 'Modifica dati NC')
 
     st.markdown('---')
     st.subheader('Azioni Correttive (AC)')
+
     df_ac_nc = df_ac[df_ac.get('nc_id', pd.Series(dtype=str)).astype(str).str.strip() == str(nc_id)].copy()
     df_ac_nc = _ensure_unique_columns(df_ac_nc)
-    ac_labels = [f"{r['ac_corrective_action_num']} - {r.get('ac_short_description','')}" for _, r in df_ac_nc.iterrows()] if not df_ac_nc.empty else []
+
+    ac_labels = []
+    if not df_ac_nc.empty:
+        for _, r in df_ac_nc.iterrows():
+            ac_labels.append(f"{r.get('ac_corrective_action_num','')} - {str(r.get('ac_short_description',''))[:80]}")
     if ac_labels:
         pick = st.selectbox('Seleziona AC da modificare', ac_labels)
-        if pick:
-            idx = ac_labels.index(pick)
-            ac_row = df_ac_nc.iloc[idx]
-            ac_id = str(ac_row['id']).strip()
-            st.write(f"**AC selezionata:** {ac_row['ac_corrective_action_num']}")
-            with st.form(key='form_modifica_ac'):
-                ac_request_status = st.text_input('Stato AC', value=ac_row.get('ac_request_status') or '')
-                ac_request_priority = st.text_input('Priorità AC', value=ac_row.get('ac_request_priority') or '')
-                ac_owner = st.text_input('Owner AC', value=ac_row.get('ac_owner') or '')
-                ac_email_address = st.text_input('Email owner AC', value=ac_row.get('ac_email_address') or '')
-                ac_short_description = st.text_input('Short description AC', value=ac_row.get('ac_short_description') or '')
-                ac_detailed_description = st.text_area('Descrizione dettagliata AC', value=ac_row.get('ac_detailed_description') or '')
-                ac_effective = st.text_input('Effettiva (AC_EFFECTIVE)', value=ac_row.get('ac_effective') or '')
-                ac_evidence_verify = st.text_area('Evidenze verifica (AC_EVIDENCE_VERIFY)', value=ac_row.get('ac_evidence_verify') or '')
-                d1,d2,d3,d4 = st.columns(4)
-                with d1: ac_date_opened = st.date_input('Data apertura AC', value=safe_date_for_input(ac_row.get('ac_date_opened')))
-                with d2: ac_date_required = st.date_input('Data richiesta chiusura', value=safe_date_for_input(ac_row.get('ac_date_required')))
-                with d3: ac_end_date = st.date_input('Data chiusura effettiva', value=safe_date_for_input(ac_row.get('ac_end_date')))
-                with d4: ac_follow_up_date = st.date_input('Data follow-up', value=safe_date_for_input(ac_row.get('ac_follow_up_date')))
-                upd = st.form_submit_button('💾 Salva modifiche AC')
-                if upd:
-                    owner_clean = ac_owner.strip(); email_clean = ac_email_address.strip()
-                    if not email_clean and owner_clean:
-                        sug = suggest_email_from_name(owner_clean)
-                        if sug: email_clean = sug
-                    vals_ac = {
-                        'ac_request_status': ac_request_status or None, 'ac_request_priority': ac_request_priority or None,
-                        'ac_owner': owner_clean or None, 'ac_email_address': email_clean or None,
-                        'ac_short_description': ac_short_description or None, 'ac_detailed_description': ac_detailed_description or None,
-                        'ac_effective': ac_effective or None, 'ac_evidence_verify': ac_evidence_verify or None,
-                        'ac_date_opened': ac_date_opened.isoformat() if ac_date_opened else None,
-                        'ac_date_required': ac_date_required.isoformat() if ac_date_required else None,
-                        'ac_end_date': ac_end_date.isoformat() if ac_end_date else None,
-                        'ac_follow_up_date': ac_follow_up_date.isoformat() if ac_follow_up_date else None,
-                    }
-                    update_ac_in_db(nc_id, ac_id, vals_ac)
-                    st.success('AC aggiornata con successo.')
-                    trigger_email_prompt(nc_id, f"Modifica AC {ac_row['ac_corrective_action_num']}")
+        idx = ac_labels.index(pick)
+        ac_row = df_ac_nc.iloc[idx]
+        ac_id = str(ac_row.get('id') or ac_row.get('ac_corrective_action_num') or '').strip()
+        st.caption(f"NC: {row.get('nonconformance_number')}  •  AC: {ac_row.get('ac_corrective_action_num')}")
+        with st.form(key='form_modifica_ac_levels'):
+            vals_ac = render_ac_form(defaults=ac_row.to_dict(), mode="edit")
+            upd = st.form_submit_button('💾 Salva modifiche AC')
+        if upd:
+            if not (vals_ac.get('ac_short_description') or '').strip():
+                st.error('Short description AC è obbligatoria.')
+            else:
+                # non cambiare codice AC in modifica
+                vals_ac_patch = dict(vals_ac)
+                vals_ac_patch.pop('ac_corrective_action_num', None)
+                update_ac_in_db(nc_id, ac_id, vals_ac_patch)
+                st.success('AC aggiornata con successo.')
+                trigger_email_prompt(nc_id, f"Modifica AC {ac_row.get('ac_corrective_action_num')}")
+    else:
+        st.info('Nessuna AC collegata a questa NC.')
 
     st.markdown('---')
     st.subheader('➕ Aggiungi nuova AC per questa NC')
+
     df_ac_all = _ensure_unique_columns(load_ac_data())
-    next_num = _next_ac_progressive(df_ac_all)
-    ac_code = f"AC {next_num} CVT"
-    st.info(f"Nuovo numero AC proposto: **{ac_code}**")
-    with st.form(key='form_inserisci_ac'):
-        ac_short_description_new = st.text_input('Short description AC *')
-        ac_owner_new = st.text_input('Owner AC')
-        ac_email_address_new = st.text_input('Email owner AC')
-        ac_request_status_new = st.text_input('Stato AC', value='OPEN')
-        ac_request_priority_new = st.text_input('Priorità AC')
-        ac_detailed_description_new = st.text_area('Descrizione dettagliata AC')
-        ac_effective_new = st.text_input('Effettiva (AC_EFFECTIVE)')
-        ac_evidence_verify_new = st.text_area('Evidenze verifica (AC_EVIDENCE_VERIFY)')
-        c1,c2 = st.columns(2)
-        today = date.today()
-        with c1: ac_date_opened_new = st.date_input('Data apertura AC', value=today)
-        with c2: ac_date_required_new = st.date_input('Data richiesta chiusura', value=today)
+    ac_code = get_next_ac_number(df_ac_all)
+
+    with st.form(key='form_inserisci_ac_levels'):
+        vals_new = render_ac_form(defaults={}, mode="create", proposed_code=ac_code)
         submit_new = st.form_submit_button('💾 Crea nuova AC')
-        if submit_new:
-            errors = []
-            if not ac_short_description_new.strip(): errors.append('Short description AC è obbligatoria.')
-            if errors:
-                for e in errors: st.error(e)
-            else:
-                owner_clean = ac_owner_new.strip(); email_clean = ac_email_address_new.strip()
-                if not email_clean and owner_clean:
-                    sug = suggest_email_from_name(owner_clean)
-                    if sug: email_clean = sug
-                vals_new_ac = {
-                    'id': ac_code,
-                    'ac_corrective_action_num': ac_code,
-                    'ac_owner': owner_clean or None, 'ac_email_address': email_clean or None,
-                    'ac_request_status': ac_request_status_new.strip() or None, 'ac_request_priority': ac_request_priority_new.strip() or None,
-                    'ac_detailed_description': ac_detailed_description_new or None, 'ac_effective': ac_effective_new or None, 'ac_evidence_verify': ac_evidence_verify_new or None,
-                    'ac_date_opened': ac_date_opened_new.isoformat(), 'ac_date_required': ac_date_required_new.isoformat() if ac_date_required_new else None,
-                }
-                insert_ac_in_db(nc_id, vals_new_ac)
-                st.success(f"AC {ac_code} creata con successo per la NC {selected_nc}.")
-                trigger_email_prompt(nc_id, f"Nuova AC {ac_code} creata")
 
-
-def get_next_nc_number(df_nc: pd.DataFrame) -> str:
-    if df_nc is None or df_nc.empty or 'nonconformance_number' not in df_nc.columns:
-        return 'NC-1-CVT'
-    mx = 0
-    for val in df_nc['nonconformance_number'].astype(str).tolist():
-        m = re.match(r"NC-(\d+)-CVT", val.strip())
-        if m:
-            try:
-                n = int(m.group(1)); mx = max(mx, n)
-            except ValueError:
-                pass
-    return f"NC-{mx+1}-CVT"
+    if submit_new:
+        errors = []
+        if not (vals_new.get('ac_short_description') or '').strip():
+            errors.append('Short description AC è obbligatoria.')
+        if errors:
+            for e in errors: st.error(e)
+        else:
+            # completa payload richiesto dal backend
+            payload = dict(vals_new)
+            payload['id'] = ac_code
+            payload['ac_corrective_action_num'] = ac_code
+            payload.setdefault('ac_request_status', 'OPEN')
+            payload['ac_date_opened'] = date.today().isoformat()
+            if not payload.get('ac_date_required'):
+                payload['ac_date_required'] = date.today().isoformat()
+            insert_ac_in_db(nc_id, payload)
+            st.success(f"AC {ac_code} creata con successo per la NC {selected_nc}.")
+            trigger_email_prompt(nc_id, f"Nuova AC {ac_code} creata")
 
 def view_inserisci_nc(df_nc: pd.DataFrame):
     st.header('➕ Inserisci nuova NC')
-    all_status = get_status_options(df_nc) if not df_nc.empty else ['OPEN','CLOSED','CANCELLED']
-    status_options_insert = [s for s in all_status if s.upper() != 'CANCELLED'] or ['OPEN','CLOSED']
-    new_nc_number = get_next_nc_number(df_nc)
-    st.info(f"Il nuovo numero NC proposto è: **{new_nc_number}**")
-    today = date.today()
-    with st.form(key='form_inserisci_nc'):
-        st.text_input('Numero NC', value=new_nc_number, disabled=True)
-        serie = st.text_input('Serie *')
-        platforms = load_platforms()
-        if platforms:
-            piattaforma = st.selectbox('Piattaforma', options=platforms, index=0)
-        else:
-            piattaforma = st.text_input('Piattaforma')
-        short_description = st.text_input('Short description *')
-        status = st.selectbox('Stato NC', options=status_options_insert, index=(status_options_insert.index('OPEN') if 'OPEN' in status_options_insert else 0))
-        nonconform_priority = st.text_input('Priorità NC')
-        responsibility = st.text_input('Responsabilità')
-        owner = st.text_input('Owner NC')
-        email_address = st.text_input('Email owner NC')
-        nonconformance_source = st.text_input('Fonte NC (source)')
-        incident_type = st.text_input('Incident type')
-        st.date_input('Data apertura (auto)', value=today, disabled=True)
-        detailed_description = st.text_area('Descrizione dettagliata')
-        det_problem_description = st.text_area('Problem description (DET_)')
-        det_cause = st.text_area('Cause (DET_CAUSE)')
-        det_close = st.text_area('Chiusura (DET_CLOSE)')
-        mob = st.selectbox('Make/Buy (MOB)', ['Make','Buy'], index=0)
+    with st.form(key='form_inserisci_nc_levels'):
+        vals = render_nc_form(df_nc=df_nc, defaults={}, mode="create")
         submitted = st.form_submit_button('💾 Crea NC')
-        if submitted:
-            errors = []
-            if not serie.strip(): errors.append('SERIE è obbligatoria.')
-            if not (piattaforma or '').strip(): errors.append('PIATTAFORMA è obbligatoria.')
-            if not short_description.strip(): errors.append('SHORT_DESCRIPTION è obbligatoria.')
-            if errors:
-                for e in errors: st.error(e)
-            else:
-                owner_clean = owner.strip(); email_clean = email_address.strip()
-                if not email_clean and owner_clean:
-                    sug = suggest_email_from_name(owner_clean)
-                    if sug: email_clean = sug
-                vals = {
-                    'id': new_nc_number,
-                    'nonconformance_number': new_nc_number,
-                    'date_opened': today.isoformat(),
-                    'nonconformance_status': status.strip(),
-                    'serie': serie.strip(),
-                    'piattaforma': (piattaforma or '').strip(),
-                    'short_description': short_description.strip(),
-                    'nonconform_priority': nonconform_priority.strip() or None,
-                    'responsibility': responsibility.strip() or None,
-                    'owner': owner_clean or None,
-                    'email_address': email_clean or None,
-                    'nonconformance_source': nonconformance_source.strip() or None,
-                    'incident_type': incident_type.strip() or None,
-                    'detailed_description': detailed_description or None,
-                    'det_problem_description': det_problem_description or None,
-                    'det_cause': det_cause or None,
-                    'det_close': det_close or None,
-                    'mob': mob,
-                }
-                nc_id = insert_nc_in_db(vals)
-                st.success(f"NC {new_nc_number} creata con successo.")
-                trigger_email_prompt(nc_id, 'Nuova NC creata')
 
+    if submitted:
+        errors = []
+        if not (vals.get('serie') or '').strip(): errors.append('SERIE è obbligatoria.')
+        if not (vals.get('piattaforma') or '').strip(): errors.append('PIATTAFORMA è obbligatoria.')
+        if not (vals.get('short_description') or '').strip(): errors.append('SHORT_DESCRIPTION è obbligatoria.')
+        if errors:
+            for e in errors: st.error(e)
+            return
+
+        nc_number = vals.get('nonconformance_number')
+        payload = dict(vals)
+        payload['id'] = nc_number
+        payload['nonconformance_number'] = nc_number
+        nc_id = insert_nc_in_db(payload)
+        st.success(f"NC {nc_number} creata con successo.")
+        trigger_email_prompt(nc_id, 'Nuova NC creata')
 
 def view_trend_nc_quality_db(df_nc: pd.DataFrame):
     st.header('📈 Trend NC Quality')
@@ -1357,6 +1674,10 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         try: st.set_page_config(page_title='NC Management (v19-fixed6)', layout='wide')
+        except Exception: pass
+        st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace in chat.")
+        st.exception(e)
+
         except Exception: pass
         st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace in chat.")
         st.exception(e)
