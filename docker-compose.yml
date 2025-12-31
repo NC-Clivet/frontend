@@ -1,11 +1,20 @@
 services:
   app-streamlit:
     build: .
-    container_name: clivet_app
-    ports:
-      - "8501:8501"
+    container_name: NC-Clivet_app
+    restart: always
     volumes:
       - .:/app
-      # Porto tutto fuori, non so se è meglio così ma al momento meno prono ad errori, poi valuterò
       - ../.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+
+  nginx:
+    image: nginx:latest
+    container_name: clivet_proxy
     restart: always
+    ports:
+      - "7443:7443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../certs:/etc/nginx/certs:ro
+    depends_on:
+      - app-streamlit
