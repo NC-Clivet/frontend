@@ -1,10 +1,11 @@
 services:
   app-streamlit:
     build: .
-    container_name: NC-Clivet_app
+    container_name: clivet_app
     ports:
-      - "8501:8501" # Porta di default da quello che ho capito
+      - "8501:8501"
     volumes:
       - .:/app
-      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+      # Porto tutto fuori, non so se è meglio così ma al momento meno prono ad errori, poi valuterò
+      - ../.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
     restart: always
