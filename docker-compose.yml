@@ -9,7 +9,7 @@ services:
 
   nginx:
     image: nginx:latest
-    container_name: clivet_proxy
+    container_name: NC-Clivet_proxy
     restart: always
     ports:
       - "7443:7443"
