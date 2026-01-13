@@ -1,4 +1,5 @@
-# app_v19_fixed6.py
+
+# app_v20.py
 # Streamlit app – NC Management (v19-fixed6)
 # - AC progressive detection from strings 'AC <n> CVT'
 # - AC creation uses formatted code and unique id
@@ -574,100 +575,42 @@ def update_ac_in_db(nc_id: str, ac_id: str, values: dict):
 from string import Template
 
 def send_mail_via_hidden_iframe(script_url: str, payload: dict, key: str = "sendmail"):
+    """
+    TOP-only: apre l'invio mail in nuova scheda (necessario per login Google).
+    Manteniamo il nome per compatibilità con il resto dell'app.
+    """
     payload_json = json.dumps(payload, ensure_ascii=False)
     payload_js = json.dumps(payload_json).replace("</", "<\\/")
 
-    # URL fallback: stessa WebApp ma mode=top (apre in nuova scheda)
-    # NB: payload_b64 lo settiamo via JS nello stesso modo del form
     tmpl_str = r"""
-<div id="$key_wrap"></div>
-
-<iframe name="$key_frame" style="display:none;"></iframe>
-
-<form id="$key_form" action="$script_url" method="POST" target="$key_frame">
-  <input type="hidden" name="op" value="send_mail" />
-  <input type="hidden" name="mode" value="iframe" />
-  <input type="hidden" name="payload_b64" id="$key_payload_b64" value="" />
-</form>
+<div id="$key_wrap" style="padding:6px 0;">
+  <div style="margin-bottom:6px;">📧 Pronto per inviare l’email.</div>
+  <button id="$key_btn"
+    style="display:inline-block; padding:6px 10px; border:1px solid #999; border-radius:6px; background:#fff; cursor:pointer;">
+    Apri invio email (nuova scheda)
+  </button>
+  <div style="padding:6px 0; font-size:12px; color:#666;">
+    Nota: l’invio avviene con l’account Google attualmente loggato nel browser.
+  </div>
+</div>
 
 <script>
 (function(){
   const payload = $payload_js;
   const scriptUrl = "$script_url";
-  const keyWrapId = "$key_wrap";
-  const timeoutMs = 12000; // 12s: se iframe non risponde (login/cookie), proponi fallback
 
   function toB64Unicode(str){ return btoa(unescape(encodeURIComponent(str))); }
-
-  const wrap = document.getElementById(keyWrapId);
   const b64 = toB64Unicode(payload);
 
-  // UI iniziale
-  wrap.innerHTML = '<div style="padding:6px 0;">📧 Invio email in corso...</div>';
+  const url = scriptUrl
+    + '?op=send_mail'
+    + '&mode=top'
+    + '&payload_b64=' + encodeURIComponent(b64);
 
-  let done = false;
-
-  function setOk(){
-    wrap.innerHTML = '<div style="padding:6px 0; color:green;">✅ Email inviata.</div>';
-  }
-
-  function setErr(msg){
-    wrap.innerHTML = '<div style="padding:6px 0; color:red;">❌ Errore invio email: ' + (msg || 'sconosciuto') + '</div>';
-  }
-
-  function showFallback(){
-    // Se in iframe non arriva niente (spesso login Google), apri top-level
-    const url = scriptUrl
-      + '?op=send_mail'
-      + '&mode=top'
-      + '&payload_b64=' + encodeURIComponent(b64);
-
-    wrap.innerHTML =
-      '<div style="padding:6px 0; color:#b45309;">⚠️ Non ho ricevuto risposta (probabile login Google bloccato nell’iframe).</div>'
-      + '<div style="padding:6px 0;">'
-      + '<a href="' + url + '" target="_blank" rel="noopener" '
-      + 'style="display:inline-block; padding:6px 10px; border:1px solid #999; border-radius:6px; text-decoration:none;">'
-      + 'Apri invio email in nuova scheda'
-      + '</a>'
-      + '</div>'
-      + '<div style="padding:2px 0; font-size:12px; color:#666;">'
-      + 'La mail verrà inviata con l’account che effettua l’accesso.'
-      + '</div>';
-  }
-
-  // Ascolto postMessage dal GAS (mode=iframe)
-  function onMsg(ev){
-    try{
-      const d = ev.data;
-      if(!d || (typeof d !== 'object')) return;
-
-      // accetta solo messaggi con ok true/false
-      if(typeof d.ok !== 'boolean') return;
-
-      done = true;
-
-      if(d.ok) setOk();
-      else setErr(d.error || 'sconosciuto');
-
-    }catch(e){
-      done = true;
-      setErr('eccezione in risposta');
-    } finally {
-      window.removeEventListener("message", onMsg);
-    }
-  }
-
-  window.addEventListener("message", onMsg);
-
-  // Compila payload e invia
-  document.getElementById("$key_payload_b64").value = b64;
-  document.getElementById("$key_form").submit();
-
-  // Timeout fallback
-  setTimeout(function(){
-    if(!done) showFallback();
-  }, timeoutMs);
-
+  const btn = document.getElementById("$key_btn");
+  btn.addEventListener("click", function(){
+    window.open(url, "_blank", "noopener");
+  });
 })();
 </script>
 """
@@ -676,13 +619,9 @@ def send_mail_via_hidden_iframe(script_url: str, payload: dict, key: str = "send
         payload_js=payload_js,
         key=key,
         key_wrap=f"{key}_wrap",
-        key_frame=f"{key}_frame",
-        key_form=f"{key}_form",
-        key_payload_b64=f"{key}_payload_b64"
+        key_btn=f"{key}_btn",
     )
-    components.html(html, height=110)
-
-# SMTP fallback
+    components.html(html, height=120)# SMTP fallback
 
 def send_email(to_addresses, subject, body):
     if isinstance(to_addresses, str):
@@ -730,6 +669,27 @@ def _pick_first(d: dict, keys: list[str]) -> str:
         if s and s.lower() != 'nan':
             return s
     return ""
+def normalize_nc_dict(raw: dict) -> dict:
+    """Converte un dict NC proveniente da Apps Script (header legacy) in chiavi canoniche snake_case."""
+    d = raw or {}
+
+    def P(*keys):
+        return _pick_first(d, list(keys))
+
+    return {
+        "nonconformance_number": P("nonconformance_number", "NONCONFORMANCE_NUMBER", "NC_NUMBER"),
+        "nonconformance_status": P("nonconformance_status", "NONCONFORMANCE_STATUS"),
+        "date_opened": P("date_opened", "DATE_OPENED"),
+        "date_closed": P("date_closed", "DATE_CLOSED"),
+        "serie": P("serie", "SERIE"),
+        "piattaforma": P("piattaforma", "PIATTAFORMA", "PIATT.", "PIATT"),
+        "mob": P("mob", "MOB"),
+        "responsibility": P("responsibility", "RESPONSIBILITY"),
+        "owner": P("owner", "OWNER"),
+        "email_address": P("email_address", "EMAIL_ADDRESS"),
+        "short_description": P("short_description", "SHORT_DESCRIPTION"),
+        "detailed_description": P("detailed_description", "DETAILED_DESCRIPTION"),
+    }
 
 def get_nc_details(nc_id: str) -> dict:
     try: data = _api_get('get_nc', id=str(nc_id))
@@ -767,79 +727,105 @@ def trigger_email_prompt(nc_id: str, operation: str, default_to: str = ""):
 def render_email_prompt():
     if not st.session_state.get('show_email_prompt'):
         return
+
     nc_id = st.session_state.get('email_nc_id')
     operation = st.session_state.get('email_operation', 'Aggiornamento NC')
+
     try:
         data = _api_get('get_nc', id=str(nc_id))
-        nc_number = str(data.get('nonconformance_number', nc_id)) if isinstance(data, dict) else str(nc_id)
+        if isinstance(data, dict):
+            nc_number = _pick_first(data, ["nonconformance_number","NONCONFORMANCE_NUMBER","NC_NUMBER"]) or str(nc_id)
+        else:
+            nc_number = str(nc_id)
     except Exception:
         nc_number = str(nc_id)
+
     emails = get_emails_for_nc(nc_id) if nc_id is not None else []
     safe_op = re.sub(r"[^A-Za-z0-9]+", "_", str(operation))
     ctx = f"{nc_id}_{safe_op}"
-    yes_key = f"email_send_yes_{ctx}"; no_key = f"email_send_no_{ctx}"
+    payload_key = f"email_payload_{ctx}"
+    sent_key = f"email_sent_{ctx}"
+    yes_key = f"email_send_yes_{ctx}"
+    no_key = f"email_send_no_{ctx}"
 
     st.markdown('---')
     st.subheader('Inviare le modifiche agli owner?')
     st.write(f"Vuoi inviare una mail agli owner della NC **{nc_number}**?")
-    # Campo destinatari precompilato con elenco o suggerimento da owner
-    nc_details = get_nc_details(nc_id) if nc_id is not None else {}
-    owner_name = (nc_details or {}).get('owner') or ''
+
+    nc_raw0 = get_nc_details(nc_id) if nc_id is not None else {}
+    nc_norm0 = normalize_nc_dict(nc_raw0)
+    owner_name = nc_norm0.get('owner') or ''
     suggested = suggest_email_from_name(owner_name) if owner_name else ''
+
     default_to = (st.session_state.get('email_default_to') or '').strip()
     prefill = default_to or (', '.join(emails) if emails else (suggested or ''))
     recipients_input = st.text_input('Destinatari (separati da ,)', value=prefill)
+
     if not recipients_input.strip():
         st.info("Inserisci almeno un destinatario per inviare l'email.")
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button('✉️ Sì, invia', key=yes_key):
             to_value = recipients_input.strip()
             if to_value:
-                nc = get_nc_details(nc_id)
-                ac_list = get_ac_details_for_nc(nc_id)
+                nc_raw = get_nc_details(nc_id)
+                nc_norm = normalize_nc_dict(nc_raw)
+
+                ac_list = get_ac_details_for_nc(nc_id) or []
+                subject_val, body_val = generate_email_subject_body(operation, nc_norm, ac_list)
+
                 action = _operation_to_action(operation)
-                subject_val, body_val = generate_email_subject_body(operation, nc or {}, ac_list or [])
-                payload_key = f"email_payload_{ctx}"
+
                 st.session_state[payload_key] = {
                     'action': action,
-                    'to': to_value,  # usa i destinatari inseriti
+                    'use_gemini': True,
+                    'to': to_value,
                     'subject': subject_val,
                     'body': body_val,
                     'nc': {
-                        'nonconformance_number': (nc or {}).get('nonconformance_number', nc_number),
-                        'subject': subject_val,
-                        'body': body_val,
-                        'short_description': (nc or {}).get('short_description',''),
-                        'opened_by': (nc or {}).get('created_by','') or (nc or {}).get('owner',''),
-                        'responsibility': (nc or {}).get('responsibility',''),
-                        'nonconformance_status': (nc or {}).get('nonconformance_status',''),
-                        'piattaforma': (nc or {}).get('piattaforma',''),
-                        'mob': (nc or {}).get('mob',''),
+                        'nonconformance_number': nc_norm.get('nonconformance_number') or nc_number,
+                        'short_description': nc_norm.get('short_description',''),
+                        'opened_by': (nc_raw or {}).get('created_by','') or nc_norm.get('owner',''),
+                        'responsibility': nc_norm.get('responsibility',''),
+                        'nonconformance_status': nc_norm.get('nonconformance_status',''),
+                        'piattaforma': nc_norm.get('piattaforma',''),
+                        'mob': nc_norm.get('mob',''),
                     },
                     'ac_list': [
                         {
-                            'ac_corrective_action_num': a.get('ac_corrective_action_num',''),
-                            'ac_short_description': a.get('ac_short_description',''),
-                            'ac_owner': a.get('ac_owner',''),
-                            'ac_request_status': a.get('ac_request_status',''),
-                        } for a in (ac_list or [])
+                            'ac_corrective_action_num': a.get('ac_corrective_action_num','') or a.get('AC_CORRECTIVE_ACTION_NUM',''),
+                            'ac_short_description': a.get('ac_short_description','') or a.get('AC_SHORT_DESCRIPTION',''),
+                            'ac_owner': a.get('ac_owner','') or a.get('AC_OWNER',''),
+                            'ac_request_status': a.get('ac_request_status','') or a.get('AC_REQUEST_STATUS',''),
+                        } for a in ac_list
                     ],
                 }
             else:
                 st.warning('Nessun indirizzo email: impossibile inviare.')
-        payload_key = f"email_payload_{ctx}"
-        if st.session_state.get(payload_key):
-            send_mail_via_hidden_iframe(MAIL_SCRIPT_URL or DATA_SCRIPT_URL, st.session_state[payload_key], key=f"mail_{ctx}")
+
+            if st.session_state.get(payload_key) and not st.session_state.get(sent_key):
+                send_mail_via_hidden_iframe(
+                    MAIL_SCRIPT_URL or DATA_SCRIPT_URL,
+                    st.session_state[payload_key],
+                    key=f"mail_{ctx}"
+                )
+                # evita reinvii su rerun
+                st.session_state[sent_key] = True
+                st.session_state.pop(payload_key, None)
+
         if st.button('✅ Chiudi', key=f"email_close_{ctx}"):
             st.session_state['show_email_prompt'] = False
             st.session_state.pop('email_default_to', None)
             st.session_state.pop(payload_key, None)
+            st.session_state.pop(sent_key, None)
             st.rerun()
+
     with c2:
         if st.button('❌ No, non inviare', key=no_key):
             st.session_state['show_email_prompt'] = False
             st.session_state.pop('email_default_to', None)
+            st.session_state.pop(sent_key, None)
 
 # ============================================================
 # GEMINI
@@ -1040,6 +1026,15 @@ Here is all the information available (NC + AC):
 # UI HELPERS
 # ============================================================
 
+# --- Streamlit compatibility wrappers (use_container_width removed end-2025) ---
+
+def st_plotly(fig, **kwargs):
+    """Safe st.plotly_chart wrapper across Streamlit versions."""
+    try:
+        return st.plotly_chart(fig, use_container_width=True, **kwargs)
+    except TypeError:
+        return st.plotly_chart(fig, **kwargs)
+
 def apply_nc_filters(df: pd.DataFrame) -> pd.DataFrame:
     f = st.text_input("Numero NC contiene:", value="").strip()
     if f:
@@ -1167,6 +1162,17 @@ def standardize_ac_df(df_ac: pd.DataFrame) -> pd.DataFrame:
 # VIEWS
 # ============================================================
 
+def st_df(df, **kwargs):
+    """
+    Wrapper compatibile per Streamlit:
+    - prova use_container_width se esiste
+    - se non esiste lo ignora
+    """
+    try:
+        return st.dataframe(df, use_container_width=True, **kwargs)
+    except TypeError:
+        return st.dataframe(df, **kwargs)
+
 def view_lista(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
     st.header('📋 Lista NC / AC')
     tipo = st.radio('Visualizza:', ('Non Conformità','Azioni Correttive'), horizontal=True)
@@ -1177,7 +1183,7 @@ def view_lista(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         df_filt = apply_nc_filters(df_nc.copy())
         base_columns = ['nonconformance_number','nonconformance_status','date_opened','date_closed','responsibility','owner','email_address','nonconformance_source','incident_type','serie','piattaforma','mob','short_description']
         cols = [c for c in base_columns if c in df_filt.columns]
-        st.dataframe(df_filt[cols], use_container_width=True)
+        st_df(df_filt[cols])
     else:
         if df_ac.empty:
             st.warning('Nessuna AC presente nel database.')
@@ -1219,14 +1225,14 @@ def view_lista(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
                 df['nonconformance_number'] = ''
         ac_columns = ['nonconformance_number','ac_corrective_action_num','ac_request_status','ac_request_priority','ac_date_opened','ac_date_required','ac_end_date','ac_owner','ac_email_address','ac_short_description']
         cols = [c for c in ac_columns if c in df.columns]
-        st.dataframe(df[cols], use_container_width=True)
+        st_df(df[cols])
 
 def view_gestione_piattaforme():
     st.header('🧩 Gestione piattaforme')
     platforms = load_platforms()
     if platforms:
         st.subheader('Piattaforme disponibili')
-        st.dataframe(pd.DataFrame({'Piattaforma': platforms}), use_container_width=True, hide_index=True)
+        st_df(pd.DataFrame({'Piattaforma': platforms}), use_container_width=True, hide_index=True)
     else:
         st.info('Nessuna piattaforma ancora definita.')
     st.markdown('---')
@@ -1296,7 +1302,7 @@ def view_consulta_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         else:
             ac_columns = ['ac_corrective_action_num','ac_request_status','ac_request_priority','ac_date_opened','ac_date_required','ac_end_date','ac_owner','ac_email_address','ac_short_description']
             cols = [c for c in ac_columns if c in df_ac_nc.columns]
-            st.dataframe(df_ac_nc[cols], use_container_width=True)
+            st_df(df_ac_nc[cols])
         st.markdown('---')
         c1, c2 = st.columns(2)
         with c1:
@@ -1473,15 +1479,17 @@ def render_nc_form(df_nc: pd.DataFrame, defaults: dict | None = None, mode: str 
     with c2:
         status = st.selectbox("Stato NC", options=status_options, index=status_options.index(cur_status))
     with c3:
-        nonconform_priority = st.text_input("Priorità NC", value=str(D('nonconform_priority','')))
+        pr_opts = ["HIGH", "MEDIUM", "LOW"]
+        cur_pr = str(D('nonconform_priority', '')).strip().upper()
+        if cur_pr not in pr_opts:
+            cur_pr = "MEDIUM"
+        nonconform_priority = st.selectbox("Priorità NC", options=pr_opts, index=pr_opts.index(cur_pr))
     with c4:
         st.text_input("Data apertura", value=str(date_opened), disabled=True)
 
-    p1, p2 = st.columns([0.9, 2.1])
-    with p1:
-        is_child = st.checkbox("NC derivata da altra NC (Parent)?", value=_truthy_flag(D('nc_parent_y_n')))
-    with p2:
-        nc_parent_ref = st.text_input("Riferimento NC padre", value=str(D('nc_parent_ref','')), disabled=(not is_child))
+    # Parent NC (nascosto in UI)
+    is_child = False
+    nc_parent_ref = ""
 
     st.subheader("2) Contesto prodotto")
     a1, a2, a3, a4 = st.columns([1, 1, 1, 1])
@@ -1495,7 +1503,7 @@ def render_nc_form(df_nc: pd.DataFrame, defaults: dict | None = None, mode: str 
         mob_cur = (str(D('mob','')) or '').strip()
         mob = st.selectbox("Make/Buy (MOB)", ['Make','Buy'], index=0 if mob_cur != 'Buy' else 1)
 
-    b1, b2, b3 = st.columns([1.3, 1.3, 1.1])
+    b1 = st.columns([1])[0]
     with b1:
         platforms = load_platforms()
         if platforms:
@@ -1504,10 +1512,12 @@ def render_nc_form(df_nc: pd.DataFrame, defaults: dict | None = None, mode: str 
             piattaforma = st.selectbox("Piattaforma *", options=platforms, index=idx)
         else:
             piattaforma = st.text_input("Piattaforma * (nessuna piattaforma definita)", value=str(D('piattaforma','')))
-    with b2:
-        macro_piattaforma = st.text_input("Macro piattaforma", value=str(D('macro_piattaforma','')))
-    with b3:
-        item_id = st.text_input("Item ID", value=str(D('item_id','')))
+
+    # campi nascosti ma lasciamo variabili “vuote” per compatibilità payload
+    macro_piattaforma = None
+    item_id = None
+    item = None
+    item_desc = None
 
     c5, c6 = st.columns([1.2, 2.8])
     with c5:
@@ -1516,21 +1526,31 @@ def render_nc_form(df_nc: pd.DataFrame, defaults: dict | None = None, mode: str 
         item_desc = st.text_input("Item descrizione", value=str(D('item_desc','')))
 
     st.subheader("3) Origine evento")
-    o1, o2, o3, o4 = st.columns(4)
-    with o1:
-        nonconformance_source = st.text_input("Fonte (source)", value=str(D('nonconformance_source','')))
-    with o2:
-        incident_type = st.text_input("Incident type", value=str(D('incident_type','')))
-    with o3:
-        service_request = st.text_input("Service request / Ticket", value=str(D('service_request','')))
-    with o4:
-        supplier = st.text_input("Supplier", value=str(D('supplier','')))
 
-    q1, q2 = st.columns(2)
-    with q1:
-        quantity_nonconforming = st.text_input("Quantità non conforme", value=str(D('quantity_nonconforming','')))
-    with q2:
-        nonconforming_uom = st.text_input("UoM", value=str(D('nonconforming_uom','')))
+    src_opts = ["Service - IService", "Complain"]
+    cur_src = str(D('nonconformance_source', '')).strip()
+    if cur_src not in src_opts:
+        # default sensato
+        cur_src = "Service - IService"
+
+    nonconformance_source = st.selectbox("Fonte (source)", options=src_opts, index=src_opts.index(cur_src))
+
+    # Incident type + Service request: SOLO per Service
+    incident_type = None
+    service_request = None
+    if nonconformance_source == "Service - IService":
+        o2, o3 = st.columns(2)
+        with o2:
+            incident_type = st.text_input("Incident type", value=str(D('incident_type','')) or "SERVICE")
+        with o3:
+            service_request = st.text_input("Service request / Ticket", value=str(D('service_request','')))
+    else:
+        st.caption("Fonte = Complain: Incident type e Service request non richiesti.")
+
+    # campi rimossi (nascosti)
+    supplier = None
+    quantity_nonconforming = None
+    nonconforming_uom = None
 
     st.subheader("4) Owner e descrizione")
     h1, h2, h3 = st.columns([1.2, 1.2, 1.0])
@@ -1563,8 +1583,8 @@ def render_nc_form(df_nc: pd.DataFrame, defaults: dict | None = None, mode: str 
         'nonconformance_status': (status or '').strip() or None,
         'nonconform_priority': (nonconform_priority or '').strip() or None,
 
-        'nc_parent_y_n': 'Y' if is_child else 'N',
-        'nc_parent_ref': (nc_parent_ref or '').strip() if is_child else None,
+        'nc_parent_y_n': 'N',
+        'nc_parent_ref': None,
 
         'serie': (serie or '').strip(),
         'grandezza': (grandezza or '').strip() or None,
@@ -1572,17 +1592,17 @@ def render_nc_form(df_nc: pd.DataFrame, defaults: dict | None = None, mode: str 
         'mob': mob,
 
         'piattaforma': (piattaforma or '').strip(),
-        'macro_piattaforma': (macro_piattaforma or '').strip() or None,
-        'item_id': (item_id or '').strip() or None,
-        'item': (item or '').strip() or None,
-        'item_desc': (item_desc or '').strip() or None,
+        'macro_piattaforma': None,
+        'item_id': None,
+        'item': None,
+        'item_desc': None,
 
         'nonconformance_source': (nonconformance_source or '').strip() or None,
         'incident_type': (incident_type or '').strip() or None,
         'service_request': (service_request or '').strip() or None,
-        'supplier': (supplier or '').strip() or None,
-        'quantity_nonconforming': (quantity_nonconforming or '').strip() or None,
-        'nonconforming_uom': (nonconforming_uom or '').strip() or None,
+        'supplier': None,
+        'quantity_nonconforming': None,
+        'nonconforming_uom': None,
 
         'responsibility': (responsibility or '').strip() or None,
         'owner': owner_clean or None,
@@ -1625,7 +1645,16 @@ def render_ac_form(defaults: dict | None = None, mode: str = "create", proposed_
             status_opts = [cur_st] + status_opts  # mantiene eventuali valori legacy
         ac_request_status = st.selectbox("Stato AC", options=status_opts, index=status_opts.index(cur_st), key=K("ac_request_status"))
     with c3:
-        ac_request_priority = st.text_input("Priorità AC", value=str(D('ac_request_priority','')), key=K("ac_request_priority"))
+        AC_PRIORITIES = ["HIGH", "MEDIUM", "LOW"]
+        cur_pr = str(D('ac_request_priority', 'MEDIUM') or 'MEDIUM').strip().upper()
+        if cur_pr not in AC_PRIORITIES:
+            AC_PRIORITIES = [cur_pr] + AC_PRIORITIES
+        ac_request_priority = st.selectbox(
+            "Priorità AC",
+            options=AC_PRIORITIES,
+            index=AC_PRIORITIES.index(cur_pr),
+            key=K("ac_request_priority")
+        )
     with c4:
         # campo solo display; la data apertura vera viene impostata in creazione lato chiamante
         st.text_input("Data apertura", value=str(D('ac_date_opened', today)), disabled=True, key=K("ac_date_opened_display"))
@@ -1644,12 +1673,10 @@ def render_ac_form(defaults: dict | None = None, mode: str = "create", proposed_
 
     st.subheader("2) Owner / email / source")
     o1, o2, o3, o4 = st.columns([1.2, 1.4, 0.9, 1.2])
-    with o1:
-        ac_owner = st.text_input("Owner AC", value=str(D('ac_owner','')), key=K("ac_owner"))
+
     with o2:
         ac_email_address = st.text_input("Email owner", value=str(D('ac_email_address','')), key=K("ac_email_address"))
-    with o3:
-        ac_send_email = st.checkbox("Invia email", value=_truthy_flag(D('ac_send_email')), key=K("ac_send_email"))
+  
     with o4:
         ac_requestor = st.text_input("Requestor", value=str(D('ac_requestor','')), key=K("ac_requestor"))
 
@@ -1677,13 +1704,13 @@ def render_ac_form(defaults: dict | None = None, mode: str = "create", proposed_
     ac_evidence_verify = st.text_area("Evidenze (AC_EVIDENCE_VERIFY)", value=str(D('ac_evidence_verify','')), height=90, key=K("ac_evidence_verify"))
 
     # autocorrezione email da owner
-    owner_clean = ac_owner.strip()
+    ac_owner_val = str(D('ac_owner', D('AC_OWNER', ''))).strip()
+    owner_clean = ac_owner_val
     email_clean = str(ac_email_address or '').strip()
     if not email_clean and owner_clean:
         sug = suggest_email_from_name(owner_clean)
         if sug:
             email_clean = sug
-
     vals = {
         'ac_corrective_action_num': ac_num_val.strip() or None,
         'ac_request_status': (ac_request_status or '').strip() or None,
@@ -1696,7 +1723,7 @@ def render_ac_form(defaults: dict | None = None, mode: str = "create", proposed_
         'ac_requestor': (ac_requestor or '').strip() or None,
         'ac_owner': owner_clean or None,
         'ac_email_address': email_clean or None,
-        'ac_send_email': 'Y' if ac_send_email else 'N',
+        'ac_send_email': 'N',
 
         'ac_short_description': (ac_short_description or '').strip(),
         'ac_detailed_description': ac_detailed_description or None,
