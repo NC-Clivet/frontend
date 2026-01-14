@@ -1,5 +1,5 @@
 
-# app_v20.py
+# app_v21.py
 # Streamlit app – NC Management (v19-fixed6)
 # - AC progressive detection from strings 'AC <n> CVT'
 # - AC creation uses formatted code and unique id
@@ -65,11 +65,13 @@ if not MAIL_SCRIPT_URL:
 DATA_KEY        = secret_any(("security","data_api_key"), "DATA_API_KEY", "data_api_key", default="")
 GEMINI_API_KEY  = secret_any(("gemini","api_key"), "GEMINI_API_KEY", "gemini_api_key", default="")
 GEMINI_MODEL    = secret_any(("gemini","model"), "GEMINI_MODEL", "gemini_model", default="gemini-2.5-flash")
-SMTP_SERVER     = secret_any(("mail","smtp_server"), "SMTP_SERVER", default="")
-SMTP_PORT       = int(secret_any(("mail","smtp_port"), "SMTP_PORT", default="0") or 0)
-SMTP_USER       = secret_any(("mail","username"), "SMTP_USER", default="")
-SMTP_PASSWORD   = secret_any(("mail","password"), "SMTP_PASSWORD", default="")
-TREND_PATH      = secret_any("TREND_PATH", default=r"P:\\QA\\007 Validazione Prodotti\\11 Non conformità\\Trend _NC Quality_.xlsx")
+# SMTP relay interno (no-auth)
+SMTP_SERVER = secret_any(("mail-server","smtp_server"), ("mail","smtp_server"), "SMTP_SERVER", default="")
+SMTP_PORT   = int(secret_any(("mail-server","smtp_server_port"), ("mail","smtp_port"), "SMTP_PORT", default="25") or 25)
+
+MAIL_FROM_HEADER  = secret_any(("mail-sender","from_header"), default="Clivet NC System <no-reply@clivet.it>")
+MAIL_ENVELOPE_FROM = secret_any(("mail-sender","envelope_from"), default="no-reply@clivet.it>")  # sistemiamo sotto
+MAIL_ENVELOPE_FROM = MAIL_ENVELOPE_FROM.replace(">", "").strip()  # safety se incolli col >TREND_PATH      = secret_any("TREND_PATH", default=r"P:\\QA\\007 Validazione Prodotti\\11 Non conformità\\Trend _NC Quality_.xlsx")
 
 if not DATA_SCRIPT_URL:
     raise RuntimeError("Manca la URL Apps Script DATA: imposta 'google.data_script_url' (o DATA_SCRIPT_URL/SCRIPT_URL).")
@@ -623,23 +625,58 @@ def send_mail_via_hidden_iframe(script_url: str, payload: dict, key: str = "send
     )
     components.html(html, height=120)# SMTP fallback
 
+def _parse_recipients(raw: str) -> list[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    parts = re.split(r"[;, \n\r\t]+", raw)
+    out = []
+    seen = set()
+    for p in parts:
+        p = p.strip()
+        if not p or "@" not in p:
+            continue
+        k = p.lower()
+        if k not in seen:
+            out.append(p)
+            seen.add(k)
+    return out
+
+
 def send_email(to_addresses, subject, body):
+    """
+    Invio tramite SMTP relay interno (no-auth) su internal-mx.clivet.it:25.
+    """
+    # accetta stringa "a@;b@" oppure lista
     if isinstance(to_addresses, str):
-        to_addresses = [to_addresses]
-    if not to_addresses:
+        to_list = _parse_recipients(to_addresses)
+    else:
+        to_list = []
+        for x in (to_addresses or []):
+            to_list += _parse_recipients(str(x))
+    if not to_list:
         return
+
     msg = MIMEMultipart()
-    msg['From'] = SMTP_USER
-    msg['To'] = ", ".join(to_addresses)
+    msg['From'] = MAIL_FROM_HEADER
+    msg['To'] = ", ".join(to_list)
     msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
+    msg.attach(MIMEText(body or "", 'plain'))
+
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
-            server.starttls(); server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, to_addresses, msg.as_string())
+        if not SMTP_SERVER or not SMTP_PORT:
+            raise RuntimeError("SMTP_SERVER/SMTP_PORT non configurati in secrets")
+
+        with smtplib.SMTP(SMTP_SERVER, int(SMTP_PORT), timeout=15) as server:
+            server.ehlo()
+            # no TLS, no login
+            server.sendmail(MAIL_ENVELOPE_FROM, to_list, msg.as_string())
+
     except Exception as e:
-        try: st.error(f"Errore nell'invio della mail: {e}")
-        except Exception: print("Errore nell'invio della mail:", e)
+        try:
+            st.error(f"Errore nell'invio della mail (SMTP relay): {e}")
+        except Exception:
+            print("Errore nell'invio della mail (SMTP relay):", e)
 
 # ============================================================
 # NC/AC HELPERS & EMAIL PROMPT
@@ -805,14 +842,13 @@ def render_email_prompt():
                 st.warning('Nessun indirizzo email: impossibile inviare.')
 
             if st.session_state.get(payload_key) and not st.session_state.get(sent_key):
-                send_mail_via_hidden_iframe(
-                    MAIL_SCRIPT_URL or DATA_SCRIPT_URL,
-                    st.session_state[payload_key],
-                    key=f"mail_{ctx}"
-                )
-                # evita reinvii su rerun
+                p = st.session_state[payload_key]
+                # invio SMTP interno
+                send_email(p.get("to", ""), p.get("subject", ""), p.get("body", ""))
+
                 st.session_state[sent_key] = True
                 st.session_state.pop(payload_key, None)
+                st.success("Email inviata via SMTP relay interno.")
 
         if st.button('✅ Chiudi', key=f"email_close_{ctx}"):
             st.session_state['show_email_prompt'] = False
@@ -2040,31 +2076,3 @@ def main():
         st.write('NC rows:', 0 if df_nc is None else len(df_nc)); st.write('AC rows:', 0 if df_ac is None else len(df_ac))
         if df_nc is not None and not df_nc.empty: st.write('NC cols:', list(df_nc.columns)[:15], '...' if len(df_nc.columns)>15 else '')
         if df_ac is not None and not df_ac.empty: st.write('AC cols:', list(df_ac.columns)[:15], '...' if len(df_ac.columns)>15 else '')
-
-    if df_ac.empty:
-        df_nc, df_ac_from_nc = _split_combined_nc_ac(df_nc)
-        if not df_ac_from_nc.empty: df_ac = df_ac_from_nc
-    if not df_nc.empty and 'id' in df_nc.columns:
-        df_nc = df_nc.drop_duplicates(subset=['id']).copy()
-    # Defensive schema alignment (prevents KeyError if backend headers drift)
-    df_nc = standardize_nc_df(df_nc)
-    df_ac = standardize_ac_df(df_ac)
-
-
-    if scelta.startswith('1'): view_lista(df_nc, df_ac)
-    elif scelta.startswith('2'): view_consulta_nc(df_nc, df_ac)
-    elif scelta.startswith('3'): view_modifica_nc(df_nc, df_ac)
-    elif scelta.startswith('4'): view_inserisci_nc(df_nc)
-    elif scelta.startswith('5'): view_trend_nc_quality_db(df_nc)
-    elif scelta.startswith('6'): view_gestione_piattaforme()
-
-    render_email_prompt()
-
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        try: st.set_page_config(page_title='NC Management (v19-fixed6)', layout='wide')
-        except Exception: pass
-        st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace in chat.")
-        st.exception(e)
