@@ -802,60 +802,60 @@ def render_email_prompt():
         st.info("Inserisci almeno un destinatario per inviare l'email.")
 
     c1, c2 = st.columns(2)
-    with c1:
-        if st.button('✉️ Sì, invia', key=yes_key):
-            to_value = recipients_input.strip()
-            if to_value:
-                nc_raw = get_nc_details(nc_id)
-                nc_norm = normalize_nc_dict(nc_raw)
+#    with c1:
+ #       if st.button('✉️ Sì, invia', key=yes_key):
+ #           to_value = recipients_input.strip()
+ #           if to_value:
+ #               nc_raw = get_nc_details(nc_id)
+ #               nc_norm = normalize_nc_dict(nc_raw)
+#
+#                ac_list = get_ac_details_for_nc(nc_id) or []
+#                subject_val, body_val = generate_email_subject_body(operation, nc_norm, ac_list)
 
-                ac_list = get_ac_details_for_nc(nc_id) or []
-                subject_val, body_val = generate_email_subject_body(operation, nc_norm, ac_list)
+#                action = _operation_to_action(operation)
 
-                action = _operation_to_action(operation)
+ #               st.session_state[payload_key] = {
+ #                   'action': action,
+ #                   'use_gemini': True,
+ #                   'to': to_value,
+ #                   'subject': subject_val,
+ #                   'body': body_val,
+ #                   'nc': {
+  #                      'nonconformance_number': nc_norm.get('nonconformance_number') or nc_number,
+  #                      'short_description': nc_norm.get('short_description',''),
+  #                      'opened_by': (nc_raw or {}).get('created_by','') or nc_norm.get('owner',''),
+  #                      'responsibility': nc_norm.get('responsibility',''),
+  #                      'nonconformance_status': nc_norm.get('nonconformance_status',''),
+  #                      'piattaforma': nc_norm.get('piattaforma',''),
+  #                      'mob': nc_norm.get('mob',''),
+  #                  },
+  #                  'ac_list': [
+  #                      {
+  #                          'ac_corrective_action_num': a.get('ac_corrective_action_num','') or a.get('AC_CORRECTIVE_ACTION_NUM',''),
+  #                          'ac_short_description': a.get('ac_short_description','') or a.get('AC_SHORT_DESCRIPTION',''),
+  #                          'ac_owner': a.get('ac_owner','') or a.get('AC_OWNER',''),
+  #                          'ac_request_status': a.get('ac_request_status','') or a.get('AC_REQUEST_STATUS',''),
+  #                      } for a in ac_list
+  #                  ],
+  #              }
+  #          else:
+  #              st.warning('Nessun indirizzo email: impossibile inviare.')
 
-                st.session_state[payload_key] = {
-                    'action': action,
-                    'use_gemini': True,
-                    'to': to_value,
-                    'subject': subject_val,
-                    'body': body_val,
-                    'nc': {
-                        'nonconformance_number': nc_norm.get('nonconformance_number') or nc_number,
-                        'short_description': nc_norm.get('short_description',''),
-                        'opened_by': (nc_raw or {}).get('created_by','') or nc_norm.get('owner',''),
-                        'responsibility': nc_norm.get('responsibility',''),
-                        'nonconformance_status': nc_norm.get('nonconformance_status',''),
-                        'piattaforma': nc_norm.get('piattaforma',''),
-                        'mob': nc_norm.get('mob',''),
-                    },
-                    'ac_list': [
-                        {
-                            'ac_corrective_action_num': a.get('ac_corrective_action_num','') or a.get('AC_CORRECTIVE_ACTION_NUM',''),
-                            'ac_short_description': a.get('ac_short_description','') or a.get('AC_SHORT_DESCRIPTION',''),
-                            'ac_owner': a.get('ac_owner','') or a.get('AC_OWNER',''),
-                            'ac_request_status': a.get('ac_request_status','') or a.get('AC_REQUEST_STATUS',''),
-                        } for a in ac_list
-                    ],
-                }
-            else:
-                st.warning('Nessun indirizzo email: impossibile inviare.')
+  #          if st.session_state.get(payload_key) and not st.session_state.get(sent_key):
+  #              p = st.session_state[payload_key]
+  #              # invio SMTP interno
+  #              send_email(p.get("to", ""), p.get("subject", ""), p.get("body", ""))
 
-            if st.session_state.get(payload_key) and not st.session_state.get(sent_key):
-                p = st.session_state[payload_key]
-                # invio SMTP interno
-                send_email(p.get("to", ""), p.get("subject", ""), p.get("body", ""))
+#                st.session_state[sent_key] = True
+#                st.session_state.pop(payload_key, None)
+#                st.success("Email inviata via SMTP relay interno.")
 
-                st.session_state[sent_key] = True
-                st.session_state.pop(payload_key, None)
-                st.success("Email inviata via SMTP relay interno.")
-
-        if st.button('✅ Chiudi', key=f"email_close_{ctx}"):
-            st.session_state['show_email_prompt'] = False
-            st.session_state.pop('email_default_to', None)
-            st.session_state.pop(payload_key, None)
-            st.session_state.pop(sent_key, None)
-            st.rerun()
+ #       if st.button('✅ Chiudi', key=f"email_close_{ctx}"):
+ #           st.session_state['show_email_prompt'] = False
+ #           st.session_state.pop('email_default_to', None)
+ #           st.session_state.pop(payload_key, None)
+ #           st.session_state.pop(sent_key, None)
+ #           st.rerun()
 
     with c2:
         if st.button('❌ No, non inviare', key=no_key):
