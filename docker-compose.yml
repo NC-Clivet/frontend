@@ -12,7 +12,7 @@ services:
     container_name: NC-Clivet_proxy
     restart: always
     ports:
-      - "7443:7443"
+      - "${PORTA_NGINX}:7443"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ../certs:/etc/nginx/certs:ro

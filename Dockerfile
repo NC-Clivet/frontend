@@ -14,7 +14,7 @@ COPY . .
 EXPOSE 8501
 
 # Comando di avvio con il nome file corretto: app.py
-CMD ["streamlit", "run", "app.py", \
+CMD ["streamlit", "run", "App.py", \
     "--server.port=8501", \
     "--server.address=0.0.0.0", \
     "--server.headless=true", \
