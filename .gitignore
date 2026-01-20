@@ -1,6 +1,9 @@
 # Streamlit secrets (NON committare)
 .streamlit/secrets.toml
 
+# File di ambiente
+.env
+
 # Python
 __pycache__/
 *.pyc
@@ -14,4 +17,5 @@ venv/
 .DS_Store
 
 Thumbs.db
+
 
