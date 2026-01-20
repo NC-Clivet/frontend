@@ -1,6 +1,6 @@
 
 # app_v21.py
-# Streamlit app – NC Management (v19-fixed6)
+# Streamlit app – NC Management (v21 - 20 Jan 2026)
 # - AC progressive detection from strings 'AC <n> CVT'
 # - AC creation uses formatted code and unique id
 # - Email prompt allows manual recipients (prefill from owner suggestion)
@@ -2103,4 +2103,5 @@ if __name__ == '__main__':
         try: st.set_page_config(page_title='NC Management (v19-fixed6)', layout='wide')
         except Exception: pass
         st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace in chat.")
+
         st.exception(e)
