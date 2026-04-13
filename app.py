@@ -1,6 +1,6 @@
 
 # app_v21.py
-# Streamlit app – NC Management (v19-fixed6)
+# Streamlit app – NC Management (v21 - 20 Jan 2026)
 # - AC progressive detection from strings 'AC <n> CVT'
 # - AC creation uses formatted code and unique id
 # - Email prompt allows manual recipients (prefill from owner suggestion)
@@ -12,7 +12,6 @@ from datetime import date, datetime
 import pandas as pd
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 import altair as alt
 import smtplib
 from email.mime.text import MIMEText
@@ -59,19 +58,20 @@ def secret_any(*candidates, default: str = ""):
     return default
 
 DATA_SCRIPT_URL = secret_any(("google","data_script_url"), ("google","script_url"), "DATA_SCRIPT_URL", "SCRIPT_URL", default="").split("?")[0]
-MAIL_SCRIPT_URL = secret_any(("google","mail_script_url"), ("google","script_url"), "MAIL_SCRIPT_URL", default="").split("?")[0]
-if not MAIL_SCRIPT_URL:
-    MAIL_SCRIPT_URL = DATA_SCRIPT_URL
 DATA_KEY        = secret_any(("security","data_api_key"), "DATA_API_KEY", "data_api_key", default="")
 GEMINI_API_KEY  = secret_any(("gemini","api_key"), "GEMINI_API_KEY", "gemini_api_key", default="")
 GEMINI_MODEL    = secret_any(("gemini","model"), "GEMINI_MODEL", "gemini_model", default="gemini-2.5-flash")
 # SMTP relay interno (no-auth)
+SMTP_USER   = secret_any(("mail-server","smtp_username"), ("mail","smtp_username"), "SMTP_USERNAME", default="")
+SMTP_PASS   = secret_any(("mail-server","smtp_password"), ("mail","smtp_password"), "SMTP_PASSWORD", default="")
+SMTP_USE_TLS = (secret_any(("mail-server","smtp_use_tls"), ("mail","smtp_use_tls"), "SMTP_USE_TLS", default="").lower() in ("1","true","yes","y"))
+
 SMTP_SERVER = secret_any(("mail-server","smtp_server"), ("mail","smtp_server"), "SMTP_SERVER", default="")
 SMTP_PORT   = int(secret_any(("mail-server","smtp_server_port"), ("mail","smtp_port"), "SMTP_PORT", default="25") or 25)
 
-MAIL_FROM_HEADER  = secret_any(("mail-sender","from_header"), default="Clivet NC System <no-reply@clivet.it>")
-MAIL_ENVELOPE_FROM = secret_any(("mail-sender","envelope_from"), default="no-reply@clivet.it>")  # sistemiamo sotto
-MAIL_ENVELOPE_FROM = MAIL_ENVELOPE_FROM.replace(">", "").strip()  # safety se incolli col >TREND_PATH      = secret_any("TREND_PATH", default=r"P:\\QA\\007 Validazione Prodotti\\11 Non conformità\\Trend _NC Quality_.xlsx")
+MAIL_FROM_HEADER  = secret_any(("mail-sender","from_header"), "MAIL_FROM_HEADER", default="Clivet NC System <no-reply@clivet.it>")
+MAIL_ENVELOPE_FROM = secret_any(("mail-sender","envelope_from"), "MAIL_ENVELOPE_FROM", default="no-reply@clivet.it")
+MAIL_BCC_MONITOR = "f.ceccato@clivet.it"
 
 if not DATA_SCRIPT_URL:
     raise RuntimeError("Manca la URL Apps Script DATA: imposta 'google.data_script_url' (o DATA_SCRIPT_URL/SCRIPT_URL).")
@@ -571,117 +571,184 @@ def update_ac_in_db(nc_id: str, ac_id: str, values: dict):
     _api_post("update_ac", id=str(ac_id), patch=patch)
     load_ac_data.clear()
 
+
 # ============================================================
-# EMAIL via iframe (Template)
+# CACHE / RERUN HELPERS
 # ============================================================
-from string import Template
 
-def send_mail_via_hidden_iframe(script_url: str, payload: dict, key: str = "sendmail"):
+def _refresh_data_and_rerun():
+    """Invalidate cached datasets and rerun the app so UI reads fresh data from backend."""
+    try:
+        load_nc_data.clear()
+    except Exception:
+        pass
+    try:
+        load_ac_data.clear()
+    except Exception:
+        pass
+    try:
+        load_platforms.clear()
+    except Exception:
+        pass
+    try:
+        st.rerun()
+    except Exception:
+        # fallback for very old Streamlit
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+
+
+def _parse_recipients(to_field: str):
     """
-    TOP-only: apre l'invio mail in nuova scheda (necessario per login Google).
-    Manteniamo il nome per compatibilità con il resto dell'app.
+    Converte una stringa tipo:
+    "mario@clivet.it; luca@clivet.it, anna@clivet.it"
+    in lista ["mario@clivet.it", "luca@clivet.it", "anna@clivet.it"]
     """
-    payload_json = json.dumps(payload, ensure_ascii=False)
-    payload_js = json.dumps(payload_json).replace("</", "<\\/")
-
-    tmpl_str = r"""
-<div id="$key_wrap" style="padding:6px 0;">
-  <div style="margin-bottom:6px;">📧 Pronto per inviare l’email.</div>
-  <button id="$key_btn"
-    style="display:inline-block; padding:6px 10px; border:1px solid #999; border-radius:6px; background:#fff; cursor:pointer;">
-    Apri invio email (nuova scheda)
-  </button>
-  <div style="padding:6px 0; font-size:12px; color:#666;">
-    Nota: l’invio avviene con l’account Google attualmente loggato nel browser.
-  </div>
-</div>
-
-<script>
-(function(){
-  const payload = $payload_js;
-  const scriptUrl = "$script_url";
-
-  function toB64Unicode(str){ return btoa(unescape(encodeURIComponent(str))); }
-  const b64 = toB64Unicode(payload);
-
-  const url = scriptUrl
-    + '?op=send_mail'
-    + '&mode=top'
-    + '&payload_b64=' + encodeURIComponent(b64);
-
-  const btn = document.getElementById("$key_btn");
-  btn.addEventListener("click", function(){
-    window.open(url, "_blank", "noopener");
-  });
-})();
-</script>
-"""
-    html = Template(tmpl_str).substitute(
-        script_url=script_url,
-        payload_js=payload_js,
-        key=key,
-        key_wrap=f"{key}_wrap",
-        key_btn=f"{key}_btn",
-    )
-    components.html(html, height=120)# SMTP fallback
-
-def _parse_recipients(raw: str) -> list[str]:
-    raw = (raw or "").strip()
-    if not raw:
+    if not to_field:
         return []
-    parts = re.split(r"[;, \n\r\t]+", raw)
-    out = []
-    seen = set()
-    for p in parts:
-        p = p.strip()
-        if not p or "@" not in p:
-            continue
-        k = p.lower()
-        if k not in seen:
-            out.append(p)
-            seen.add(k)
-    return out
+
+    cleaned = to_field.replace(";", ",")
+    parts = [p.strip() for p in cleaned.split(",")]
+    return [p for p in parts if p]
 
 
-def send_email(to_addresses, subject, body):
+def send_email(to_addresses, cc_addresses, subject, body, bcc_addresses=None):
+    """Invio email via SMTP.
+    - From visualizzato = MAIL_FROM_HEADER
+    - envelope-from SMTP = MAIL_ENVELOPE_FROM
+    - supporta TO / CC / BCC
     """
-    Invio tramite SMTP relay interno (no-auth) su internal-mx.clivet.it:25.
-    """
-    # accetta stringa "a@;b@" oppure lista
-    if isinstance(to_addresses, str):
-        to_list = _parse_recipients(to_addresses)
-    else:
-        to_list = []
-        for x in (to_addresses or []):
-            to_list += _parse_recipients(str(x))
+
+    def _to_list(x):
+        if not x:
+            return []
+        if isinstance(x, str):
+            return _parse_recipients(x)
+        out = []
+        for item in (x or []):
+            out += _parse_recipients(str(item))
+        return out
+
+    def _unique(seq):
+        seen = set()
+        out = []
+        for v in seq:
+            v = str(v or '').strip()
+            if not v or v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+        return out
+
+    to_list = _unique(_to_list(to_addresses))
+    cc_list = _unique(_to_list(cc_addresses))
+    bcc_list = _unique(_to_list(bcc_addresses))
+
     if not to_list:
-        return
+        raise RuntimeError("Nessun destinatario in TO")
 
     msg = MIMEMultipart()
     msg['From'] = MAIL_FROM_HEADER
     msg['To'] = ", ".join(to_list)
+    if cc_list:
+        msg['Cc'] = ", ".join(cc_list)
     msg['Subject'] = subject
-    msg.attach(MIMEText(body or "", 'plain'))
+    msg.attach(MIMEText(body or "", 'plain', 'utf-8'))
 
-    try:
-        if not SMTP_SERVER or not SMTP_PORT:
-            raise RuntimeError("SMTP_SERVER/SMTP_PORT non configurati in secrets")
+    rcpt_list = _unique(to_list + cc_list + bcc_list)
 
-        with smtplib.SMTP(SMTP_SERVER, int(SMTP_PORT), timeout=15) as server:
+    if not SMTP_SERVER or not SMTP_PORT:
+        raise RuntimeError("SMTP server non configurato (mail-server.smtp_server / smtp_server_port)")
+
+    with smtplib.SMTP(SMTP_SERVER, int(SMTP_PORT), timeout=20) as server:
+        server.ehlo()
+        if SMTP_USE_TLS:
+            server.starttls()
             server.ehlo()
-            # no TLS, no login
-            server.sendmail(MAIL_ENVELOPE_FROM, to_list, msg.as_string())
+        if SMTP_USER and SMTP_PASS:
+            server.login(SMTP_USER, SMTP_PASS)
 
-    except Exception as e:
-        try:
-            st.error(f"Errore nell'invio della mail (SMTP relay): {e}")
-        except Exception:
-            print("Errore nell'invio della mail (SMTP relay):", e)
+        server.sendmail(MAIL_ENVELOPE_FROM, rcpt_list, msg.as_string())
+        
+def generate_email_subject_body_fast(operation: str, nc: dict, ac_list: list[dict] | None = None) -> tuple[str, str]:
+    ac_list = ac_list or []
+    op = (operation or "").lower().strip()
 
-# ============================================================
-# NC/AC HELPERS & EMAIL PROMPT
-# ============================================================
+    nc_number = str(_get_any(nc, "nonconformance_number", "NONCONFORMANCE_NUMBER", "id", default="")).strip() or "?"
+    status = str(_get_any(nc, "nonconformance_status", "NONCONFORMANCE_STATUS", default="")).strip()
+    piattaforma = str(_get_any(nc, "piattaforma", "PIATTAFORMA", default="")).strip()
+    serie = str(_get_any(nc, "serie", "SERIE", default="")).strip()
+    mob = str(_get_any(nc, "mob", "MOB", default="")).strip()
+    owner = str(_get_any(nc, "owner", "OWNER", default="")).strip()
+    responsibility = str(_get_any(nc, "responsibility", "RESPONSIBILITY", default="")).strip()
+    short_desc = str(_get_any(nc, "short_description", "SHORT_DESCRIPTION", default="")).strip()
+    detailed_desc = str(_get_any(nc, "detailed_description", "DETAILED_DESCRIPTION", default="")).strip()
 
+    if "nuova" in op and "nc" in op:
+        subject = f"{nc_number} - Nuova Non Conformità"
+    else:
+        subject = f"{nc_number} - Aggiornamento Non Conformità"
+
+    lines = [
+        "Buongiorno,",
+        "",
+        "di seguito il riepilogo della Non Conformità registrata/aggiornata:",
+        "",
+        f"NC: {nc_number}",
+    ]
+
+    if status:
+        lines.append(f"Stato: {status}")
+    if serie:
+        lines.append(f"Serie: {serie}")
+    if piattaforma:
+        lines.append(f"Piattaforma: {piattaforma}")
+    if mob:
+        lines.append(f"Make/Buy: {mob}")
+    if responsibility:
+        lines.append(f"Responsabilità: {responsibility}")
+    if owner:
+        lines.append(f"Owner: {owner}")
+    if short_desc:
+        lines.append(f"Descrizione breve: {short_desc}")
+    if detailed_desc:
+        lines.append(f"Descrizione dettagliata: {detailed_desc}")
+
+    if ac_list:
+        lines.append("")
+        lines.append("Azioni Correttive collegate:")
+        for a in ac_list:
+            ac_num = str(_get_any(a, "ac_corrective_action_num", "AC_CORRECTIVE_ACTION_NUM", default="")).strip()
+            ac_status = str(_get_any(a, "ac_request_status", "AC_REQUEST_STATUS", default="")).strip()
+            ac_owner = str(_get_any(a, "ac_owner", "AC_OWNER", default="")).strip()
+            ac_short = str(_get_any(a, "ac_short_description", "AC_SHORT_DESCRIPTION", default="")).strip()
+
+            row = "- "
+            if ac_num:
+                row += ac_num
+            if ac_short:
+                row += f": {ac_short}"
+            extra = []
+            if ac_status:
+                extra.append(f"stato {ac_status}")
+            if ac_owner:
+                extra.append(f"owner {ac_owner}")
+            if extra:
+                row += f" ({', '.join(extra)})"
+            lines.append(row)
+
+    lines.extend([
+        "",
+        "Accedi direttamente all'applicativo NC Management:",
+        "https://docker.clivet.it:7443/",
+        "",
+        "Grazie."
+    ])
+
+    return subject, "\n".join(lines)
+    
 def _normalize_name_for_email(s: str) -> str:
     s = s.strip().lower()
     s = unicodedata.normalize("NFKD", s)
@@ -738,6 +805,11 @@ def get_ac_details_for_nc(nc_id: str) -> list[dict]:
     except Exception: data = None
     return data if isinstance(data, list) else []
 
+
+def get_ac_for_nc(nc_id: str) -> list[dict]:
+    """Backward-compatible alias used by render_email_box."""
+    return get_ac_details_for_nc(nc_id)
+
 def get_emails_for_nc(nc_id: str) -> list[str]:
     emails = set()
     nc = get_nc_details(nc_id)
@@ -755,117 +827,109 @@ def _operation_to_action(operation: str) -> str:
     if 'modif' in op or 'aggiorn' in op or 'update' in op: return 'update_nc'
     return 'update_nc'
 
-def trigger_email_prompt(nc_id: str, operation: str, default_to: str = ""):
-    st.session_state['email_nc_id'] = nc_id
-    st.session_state['email_operation'] = operation
-    st.session_state['email_default_to'] = (default_to or "").strip()
-    st.session_state['show_email_prompt'] = True
 
-def render_email_prompt():
-    if not st.session_state.get('show_email_prompt'):
+def _extract_emails(*values) -> list[str]:
+    """Estrae email da stringhe/valori eterogenei."""
+    emails = []
+    for v in values:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s:
+            continue
+        # se è già una lista tipo "a@;b@" la parserizziamo
+        for cand in _parse_recipients(s):
+            if cand and "@" in cand:
+                emails.append(cand)
+        # estrazione grezza da testo
+        for m in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", s):
+            emails.append(m)
+    # unique preservando ordine
+    seen=set(); out=[]
+    for e in emails:
+        e=str(e).strip()
+        if e and e not in seen:
+            seen.add(e); out.append(e)
+    return out
+
+
+def render_email_box(*, context_key: str, nc_id: str, operation: str = "Aggiornamento NC", default_to: str = "", default_cc: str = ""):
+    """Box unico per invio email (TO/CC + bottone).
+    - TO viene precompilato con default_to e/o email trovate su NC/AC (se presenti)
+    - Corpo generato via Gemini con prompt fisso
+    - Invio via SMTP (unico metodo)
+    """
+    if not nc_id:
+        st.info("Salva/crea prima la NC per inviare l'email.")
         return
 
-    nc_id = st.session_state.get('email_nc_id')
-    operation = st.session_state.get('email_operation', 'Aggiornamento NC')
+    st.markdown("""<div style="border:1px solid #ddd;border-radius:10px;padding:12px;background:#fafafa">
+    <b>✉️ Invia email</b><br/>
+    Compila <b>TO</b> e <b>CC</b> (opzionale) e premi <b>Invia</b>. Il testo viene generato con Gemini.
+    </div>""", unsafe_allow_html=True)
 
-    try:
-        data = _api_get('get_nc', id=str(nc_id))
-        if isinstance(data, dict):
-            nc_number = _pick_first(data, ["nonconformance_number","NONCONFORMANCE_NUMBER","NC_NUMBER"]) or str(nc_id)
-        else:
-            nc_number = str(nc_id)
-    except Exception:
-        nc_number = str(nc_id)
+    # carica NC/AC (spinner vero)
+    with st.spinner("Caricamento dati per email..."):
+        nc = get_nc_details(nc_id)
+        ac_list = get_ac_details_for_nc(nc_id)
 
-    emails = get_emails_for_nc(nc_id) if nc_id is not None else []
-    safe_op = re.sub(r"[^A-Za-z0-9]+", "_", str(operation))
-    ctx = f"{nc_id}_{safe_op}"
-    payload_key = f"email_payload_{ctx}"
-    sent_key = f"email_sent_{ctx}"
-    yes_key = f"email_send_yes_{ctx}"
-    no_key = f"email_send_no_{ctx}"
+    # prefill TO: default_to (da form) + eventuali email presenti nei record
+    to_candidates = []
+    to_candidates += _extract_emails(default_to)
+    # prova a pescare email da campi noti
+    to_candidates += _extract_emails(
+        _get_any(nc or {}, "email_address", "EMAIL_ADDRESS", "email_owner", "EMAIL_OWNER", "owner_email", "OWNER_EMAIL", default=""),
+        _get_any(nc or {}, "owner", "OWNER", default=""),
+    )
+    # anche dalle AC (se presenti)
+    for a in (ac_list or []):
+        to_candidates += _extract_emails(_get_any(a, "ac_email_address", "AC_EMAIL_ADDRESS", default=""))
 
-    st.markdown('---')
-    st.subheader('Inviare le modifiche agli owner?')
-    st.write(f"Vuoi inviare una mail agli owner della NC **{nc_number}**?")
+    # unique preservando ordine
+    seen=set(); merged_to=[]
+    for e in to_candidates:
+        if e and e not in seen:
+            seen.add(e); merged_to.append(e)
 
-    nc_raw0 = get_nc_details(nc_id) if nc_id is not None else {}
-    nc_norm0 = normalize_nc_dict(nc_raw0)
-    owner_name = nc_norm0.get('owner') or ''
-    suggested = suggest_email_from_name(owner_name) if owner_name else ''
+    to_prefill = "; ".join(merged_to) if merged_to else ""
+    cc_prefill = "; ".join(_extract_emails(default_cc)) if default_cc else ""
 
-    default_to = (st.session_state.get('email_default_to') or '').strip()
-    prefill = default_to or (', '.join(emails) if emails else (suggested or ''))
-    recipients_input = st.text_input('Destinatari (separati da ,)', value=prefill)
-
-    if not recipients_input.strip():
-        st.info("Inserisci almeno un destinatario per inviare l'email.")
+    # stato persistente tra rerun
+    to_key = f"{context_key}_to"
+    cc_key = f"{context_key}_cc"
+    if to_key not in st.session_state:
+        st.session_state[to_key] = to_prefill
+    if cc_key not in st.session_state:
+        st.session_state[cc_key] = cc_prefill
 
     c1, c2 = st.columns(2)
-#    with c1:
- #       if st.button('✉️ Sì, invia', key=yes_key):
- #           to_value = recipients_input.strip()
- #           if to_value:
- #               nc_raw = get_nc_details(nc_id)
- #               nc_norm = normalize_nc_dict(nc_raw)
-#
-#                ac_list = get_ac_details_for_nc(nc_id) or []
-#                subject_val, body_val = generate_email_subject_body(operation, nc_norm, ac_list)
-
-#                action = _operation_to_action(operation)
-
- #               st.session_state[payload_key] = {
- #                   'action': action,
- #                   'use_gemini': True,
- #                   'to': to_value,
- #                   'subject': subject_val,
- #                   'body': body_val,
- #                   'nc': {
-  #                      'nonconformance_number': nc_norm.get('nonconformance_number') or nc_number,
-  #                      'short_description': nc_norm.get('short_description',''),
-  #                      'opened_by': (nc_raw or {}).get('created_by','') or nc_norm.get('owner',''),
-  #                      'responsibility': nc_norm.get('responsibility',''),
-  #                      'nonconformance_status': nc_norm.get('nonconformance_status',''),
-  #                      'piattaforma': nc_norm.get('piattaforma',''),
-  #                      'mob': nc_norm.get('mob',''),
-  #                  },
-  #                  'ac_list': [
-  #                      {
-  #                          'ac_corrective_action_num': a.get('ac_corrective_action_num','') or a.get('AC_CORRECTIVE_ACTION_NUM',''),
-  #                          'ac_short_description': a.get('ac_short_description','') or a.get('AC_SHORT_DESCRIPTION',''),
-  #                          'ac_owner': a.get('ac_owner','') or a.get('AC_OWNER',''),
-  #                          'ac_request_status': a.get('ac_request_status','') or a.get('AC_REQUEST_STATUS',''),
-  #                      } for a in ac_list
-  #                  ],
-  #              }
-  #          else:
-  #              st.warning('Nessun indirizzo email: impossibile inviare.')
-
-  #          if st.session_state.get(payload_key) and not st.session_state.get(sent_key):
-  #              p = st.session_state[payload_key]
-  #              # invio SMTP interno
-  #              send_email(p.get("to", ""), p.get("subject", ""), p.get("body", ""))
-
-#                st.session_state[sent_key] = True
-#                st.session_state.pop(payload_key, None)
-#                st.success("Email inviata via SMTP relay interno.")
-
- #       if st.button('✅ Chiudi', key=f"email_close_{ctx}"):
- #           st.session_state['show_email_prompt'] = False
- #           st.session_state.pop('email_default_to', None)
- #           st.session_state.pop(payload_key, None)
- #           st.session_state.pop(sent_key, None)
- #           st.rerun()
-
+    with c1:
+        to_raw = st.text_input("TO (destinatari)", key=to_key, placeholder="nome@clivet.it; altro@clivet.it")
     with c2:
-        if st.button('❌ No, non inviare', key=no_key):
-            st.session_state['show_email_prompt'] = False
-            st.session_state.pop('email_default_to', None)
-            st.session_state.pop(sent_key, None)
+        cc_raw = st.text_input("CC (in copia)", key=cc_key, placeholder="copia@clivet.it; ...")
 
-# ============================================================
-# GEMINI
-# ============================================================
+    if st.button("📨 Invia email", key=f"{context_key}_send"):
+        to_list = _parse_recipients(to_raw)
+        cc_list = _parse_recipients(cc_raw)
+
+        if not to_list:
+            st.error("Inserisci almeno un destinatario in TO.")
+            return
+
+        try:
+            with st.spinner("Invio email in corso..."):
+                subject, body = generate_email_subject_body_fast(operation, nc or {}, ac_list or [])
+                send_email(
+                    to_list,
+                    cc_list,
+                    subject,
+                    body,
+                    bcc_addresses=[MAIL_BCC_MONITOR]
+                )
+            st.success("Email inviata.")
+        except Exception as e:
+            st.error(f"Invio email non riuscito: {e}")
+
 
 def call_gemini(prompt: str) -> str:
     if genai is None:
@@ -879,97 +943,100 @@ def call_gemini(prompt: str) -> str:
 
 
 
+def _get_any(d: dict, *keys, default=""):
+    for k in keys:
+        if not k:
+            continue
+        if k in d and d[k] not in (None, ""):
+            return d[k]
+        kl = str(k).lower()
+        # try case-insensitive
+        for kk, vv in (d or {}).items():
+            if str(kk).lower() == kl and vv not in (None, ""):
+                return vv
+    return default
+
 def generate_email_subject_body(operation: str, nc: dict, ac_list: list[dict] | None = None) -> tuple[str, str]:
-    """Genera oggetto e corpo email con Gemini. Fallback deterministico se Gemini non disponibile."""
-    ac_list = ac_list or []
-    op = (operation or "").lower()
+    try:
+        return generate_email_subject_body_fast(operation, nc, ac_list)
+    except Exception:
+        ncn = str(_get_any(nc or {}, "nonconformance_number", "NONCONFORMANCE_NUMBER", "id", default="")).strip() or "?"
+        return (f"{ncn} - Aggiornamento Non Conformità", f"NC {ncn}\n\nAccedi all'applicativo:\nhttps://docker.clivet.it:7443/")
+        
 
-    if "nuova ac" in op or ("ac" in op and ("creat" in op or "nuov" in op)):
-        event = "AC_CREATED"
-    elif "modifica ac" in op or ("ac" in op and ("modif" in op or "aggiorn" in op)):
-        event = "AC_UPDATED"
-    elif "nuova nc" in op or ("nc" in op and ("creat" in op or "nuov" in op)):
-        event = "NC_CREATED"
-    elif "modifica" in op or "aggiorn" in op:
-        event = "NC_UPDATED"
-    else:
-        event = "NC_UPDATED"
+def generate_email_body_with_gemini(nc: dict, ac_list: list[dict]) -> str:
+    """Genera il corpo email con Gemini. Se Gemini non è disponibile/configurato, fallback breve."""
+    # prepara blocco AC con le chiavi che possono arrivare in vari formati
+    lines = []
+    for a in (ac_list or []):
+        ac_num = str(_get_any(a, "AC_CORRECTIVE_ACTION_NUM", "ac_corrective_action_num", "AC_NUM", default="")).strip()
+        ac_sd  = str(_get_any(a, "AC_SHORT_DESCRIPTION", "ac_short_description", default="")).strip()
+        ac_own = str(_get_any(a, "AC_OWNER", "ac_owner", default="")).strip()
+        ac_st  = str(_get_any(a, "AC_REQUEST_STATUS", "ac_request_status", default="")).strip()
 
-    # contesto minimo e stabile (chiavi principali richieste)
-    ncn = (nc or {}).get("nonconformance_number", "")
-    serie = (nc or {}).get("serie", "")
-    opened = (nc or {}).get("date_opened", "")
-    sdesc = (nc or {}).get("short_description", "")
-    ldesc = (nc or {}).get("detailed_description", "")
+        if not (ac_num or ac_sd or ac_own or ac_st):
+            continue
 
-    ac_lines = []
-    for a in ac_list[:10]:
-        ac_lines.append(
-            f"- {a.get('ac_corrective_action_num','')} | {a.get('ac_request_status','')} | "
-            f"{a.get('ac_owner','')} | {a.get('ac_short_description','')}"
-        )
-    ac_block = "\n".join(ac_lines) if ac_lines else "(nessuna AC collegata)"
+        part = f"- {ac_num}: {ac_sd}"
+        tail = []
+        if ac_own:
+            tail.append(f"Owner: {ac_own}")
+        if ac_st:
+            tail.append(f"Stato: {ac_st}")
+        if tail:
+            part += " | " + " | ".join(tail)
+        lines.append(part)
 
-    prompt = f"""
-Sei un assistente per Quality Management (Non Conformità e Azioni Correttive).
-Devi generare una email professionale in italiano.
+    ac_block = "\n".join(lines)
 
-Evento: {event}
+    prompt = f'''Sei un Quality Manager in azienda HVAC.
+Scrivi una email breve, chiara e professionale in italiano.
+Obiettivo: informare gli owner che c'è un aggiornamento su una Non Conformità (NC) e sulle relative Azioni Correttive (AC).
+Stile: concreto, operativo, no fronzoli, max 12-15 righe.
 
-Dati NC:
-- Numero NC: {ncn}
-- Serie: {serie}
-- Data apertura: {opened}
-- Short description: {sdesc}
-- Descrizione dettagliata: {ldesc}
+DATI NC:
+- Numero: {str(_get_any(nc, "nonconformance_number", "NONCONFORMANCE_NUMBER", "id", default="")).strip()}
+- Stato: {str(_get_any(nc, "nonconformance_status", "NONCONFORMANCE_STATUS", default="")).strip()}
+- Piattaforma: {str(_get_any(nc, "piattaforma", "PIATTAFORMA", default="")).strip()}
+- MOB (Make/Buy): {str(_get_any(nc, "mob", "MOB", default="")).strip()}
+- Responsabilità: {str(_get_any(nc, "responsibility", "RESPONSIBILITY", default="")).strip()}
+- In carico a: {str(_get_any(nc, "owner", "OWNER", default="")).strip()}
+- Short description: {str(_get_any(nc, "short_description", "SHORT_DESCRIPTION", default="")).strip()}
 
-AC collegate (se presenti):
+DATI AC (lista):
 {ac_block}
 
-Requisiti:
-- Se evento NC_CREATED: scrivi che la NC è stata creata.
-- Se evento NC_UPDATED: scrivi che la NC è stata modificata.
-- Se evento AC_CREATED: scrivi che è stata inserita una nuova Azione Correttiva collegata alla NC.
-- Se evento AC_UPDATED: scrivi che è stata modificata una Azione Correttiva collegata alla NC.
-- Tono: chiaro, sintetico, operativo. Non inventare dati.
-- Restituisci ESCLUSIVAMENTE un JSON con due chiavi: "subject" e "body".
-- Il body deve essere testo semplice (no HTML), con elenco puntato se utile.
-"""
+Vincoli:
+- Non inventare dati assenti: se mancano, ometti quella riga.
+- Chiudi con una call-to-action: "Verifica e aggiorna lo stato in piattaforma NC Management al link https://docker.clivet.it:7443/".
+'''
+
+    # Gemini
+    if genai is None or not GEMINI_API_KEY:
+        # fallback minimo
+        fallback_lines = [
+            "Ciao,",
+            "",
+            f"ti informo che la NC {str(_get_any(nc, 'nonconformance_number','id', default='')).strip()} è stata aggiornata.",
+        ]
+        if lines:
+            fallback_lines += ["", "Azioni Correttive collegate:", *lines[:10]]
+        fallback_lines += ["", 'Verifica e aggiorna lo stato in piattaforma NC Management al link https://docker.clivet.it:7443/.']
+        return "\n".join([l for l in fallback_lines if l is not None])
 
     try:
-        out = call_gemini(prompt)
-        m = re.search(r"\{.*\}", out, flags=re.S)
-        if m:
-            j = json.loads(m.group(0))
-            subject = str(j.get("subject", "")).strip()
-            body = str(j.get("body", "")).strip()
-            if subject and body:
-                return subject, body
-    except Exception:
-        pass
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        resp = model.generate_content(prompt)
+        text = (getattr(resp, "text", "") or "").strip()
+        if text:
+            return text
+    except Exception as e:
+        # fallback in caso di errore
+        return f"Errore generazione testo email con Gemini: {e}"
 
-    # Fallback deterministico
-    if event == "NC_CREATED":
-        subj = f"[{ncn}] NC creata"
-    elif event == "NC_UPDATED":
-        subj = f"[{ncn}] NC modificata"
-    elif event == "AC_CREATED":
-        subj = f"[{ncn}] Nuova AC collegata"
-    else:
-        subj = f"[{ncn}] AC aggiornata"
+    return "Impossibile generare il testo email con Gemini."
 
-    body = (
-        f"Ciao,\n\n"
-        f"Evento: {event}\n"
-        f"NC: {ncn}\n"
-        f"Serie: {serie}\n"
-        f"Data apertura: {opened}\n\n"
-        f"Sintesi: {sdesc}\n\n"
-        f"Dettaglio: {ldesc}\n\n"
-        f"AC collegate:\n{ac_block}\n\n"
-        f"Grazie.\n"
-    )
-    return subj, body
 
 def build_nc_ac_context(nc_row: pd.Series, df_ac_nc: pd.DataFrame) -> str:
     lines = []
@@ -1067,7 +1134,7 @@ Here is all the information available (NC + AC):
 def st_plotly(fig, **kwargs):
     """Safe st.plotly_chart wrapper across Streamlit versions."""
     try:
-        return st.plotly_chart(fig, use_container_width=True, **kwargs)
+        return st.plotly_chart(fig, width="stretch", **kwargs)
     except TypeError:
         return st.plotly_chart(fig, **kwargs)
 
@@ -1205,44 +1272,62 @@ def st_df(df, **kwargs):
     - se non esiste lo ignora
     """
     try:
-        return st.dataframe(df, use_container_width=True, **kwargs)
+        return st.dataframe(df, width="stretch", **kwargs)
     except TypeError:
         return st.dataframe(df, **kwargs)
-
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    if df is None:
+        df = pd.DataFrame()
+    return df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+    
 def view_lista(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
     st.header('📋 Lista NC / AC')
     tipo = st.radio('Visualizza:', ('Non Conformità','Azioni Correttive'), horizontal=True)
+
     if tipo == 'Non Conformità':
         if df_nc.empty:
             st.warning('Nessuna NC presente nel database.')
             return
+
         df_filt = apply_nc_filters(df_nc.copy())
-        base_columns = ['nonconformance_number','nonconformance_status','date_opened','date_closed','responsibility','owner','email_address','nonconformance_source','incident_type','serie','piattaforma','mob','short_description']
+        base_columns = [
+            'nonconformance_number','nonconformance_status','date_opened','date_closed',
+            'responsibility','owner','email_address','nonconformance_source',
+            'incident_type','serie','piattaforma','mob','short_description'
+        ]
         cols = [c for c in base_columns if c in df_filt.columns]
-        st_df(df_filt[cols])
+        export_df = df_filt[cols].copy()
+
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st_df(export_df)
+        with c2:
+            st.download_button(
+                label="⬇️ Scarica NC (CSV)",
+                data=df_to_csv_bytes(export_df),
+                file_name=f"lista_nc_{date.today().isoformat()}.csv",
+                mime="text/csv",
+                key="download_nc_csv"
+            )
+
     else:
         if df_ac.empty:
             st.warning('Nessuna AC presente nel database.')
             return
+
         df = _ensure_unique_columns(standardize_ac_df(df_ac.copy()))
         df_nc_std = standardize_nc_df(df_nc)
 
-        # Prova a risalire al numero NC per ogni AC:
-        # - prima usando mapping id -> nonconformance_number (se AC.nc_id contiene l'id)
-        # - poi fallback: se AC.nc_id contiene già il numero NC, lo copiamo direttamente
         if 'nc_id' in df.columns:
             df['nc_id_str'] = df['nc_id'].astype(str).str.strip()
 
-            # 1) mapping per id (join robusto)
             if 'id' in df_nc_std.columns and 'nonconformance_number' in df_nc_std.columns:
                 try:
                     map_by_id = df_nc_std.drop_duplicates(subset=['id']).set_index('id')['nonconformance_number'].astype(str)
                     df['nonconformance_number'] = df['nc_id_str'].map(map_by_id)
                 except Exception:
-                    # se qualcosa va storto non blocchiamo la UI
                     df['nonconformance_number'] = df.get('nonconformance_number', '')
 
-            # 2) fallback: se nc_id contiene già il numero NC (o il mapping sopra non ha trovato match)
             if 'nonconformance_number' in df_nc_std.columns:
                 try:
                     mask_missing = df.get('nonconformance_number')
@@ -1250,7 +1335,6 @@ def view_lista(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
                         mask_missing = pd.Series(True, index=df.index)
                     else:
                         mask_missing = mask_missing.isna() | (mask_missing.astype(str).str.strip() == "")
-                    # qui mappare su se stesso non serve: prendiamo direttamente nc_id_str
                     df.loc[mask_missing, 'nonconformance_number'] = df.loc[mask_missing, 'nc_id_str']
                 except Exception:
                     pass
@@ -1259,16 +1343,33 @@ def view_lista(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
         else:
             if 'nonconformance_number' not in df.columns:
                 df['nonconformance_number'] = ''
-        ac_columns = ['nonconformance_number','ac_corrective_action_num','ac_request_status','ac_request_priority','ac_date_opened','ac_date_required','ac_end_date','ac_owner','ac_email_address','ac_short_description']
-        cols = [c for c in ac_columns if c in df.columns]
-        st_df(df[cols])
 
+        ac_columns = [
+            'nonconformance_number','ac_corrective_action_num','ac_request_status',
+            'ac_request_priority','ac_date_opened','ac_date_required','ac_end_date',
+            'ac_owner','ac_email_address','ac_short_description'
+        ]
+        cols = [c for c in ac_columns if c in df.columns]
+        export_df = df[cols].copy()
+
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st_df(export_df)
+        with c2:
+            st.download_button(
+                label="⬇️ Scarica AC (CSV)",
+                data=df_to_csv_bytes(export_df),
+                file_name=f"lista_ac_{date.today().isoformat()}.csv",
+                mime="text/csv",
+                key="download_ac_csv"
+            )
+            
 def view_gestione_piattaforme():
     st.header('🧩 Gestione piattaforme')
     platforms = load_platforms()
     if platforms:
         st.subheader('Piattaforme disponibili')
-        st_df(pd.DataFrame({'Piattaforma': platforms}), use_container_width=True, hide_index=True)
+        st_df(pd.DataFrame({'Piattaforma': platforms}), width="stretch", hide_index=True)
     else:
         st.info('Nessuna piattaforma ancora definita.')
     st.markdown('---')
@@ -1808,9 +1909,10 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
             # in modifica non vogliamo cambiare il numero NC
             vals_patch = dict(vals)
             vals_patch.pop('nonconformance_number', None)
+            # enforce id = NONCONFORMANCE_NUMBER in backend (sheet)
+            vals_patch['id'] = str(row.get('nonconformance_number') or row.get('id') or '').strip() or str(selected_nc)
             update_nc_in_db(nc_id, vals_patch)
             st.success('NC aggiornata con successo.')
-            trigger_email_prompt(nc_id, 'Modifica dati NC', default_to=str(vals.get('email_address','')))
 
     st.markdown('---')
     st.subheader('Azioni Correttive (AC)')
@@ -1840,7 +1942,7 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
                 vals_ac_patch.pop('ac_corrective_action_num', None)
                 update_ac_in_db(nc_id, ac_id, vals_ac_patch)
                 st.success('AC aggiornata con successo.')
-                trigger_email_prompt(nc_id, f"Modifica AC {ac_row.get('ac_corrective_action_num')}", default_to=str(vals_ac.get('ac_email_address','')))
+                # trigger_email_prompt(nc_id, f"Modifica AC {ac_row.get('ac_corrective_action_num')}", default_to=str(vals_ac.get('ac_email_address','')))
     else:
         st.info('Nessuna AC collegata a questa NC.')
 
@@ -1872,7 +1974,14 @@ def view_modifica_nc(df_nc: pd.DataFrame, df_ac: pd.DataFrame):
                 payload['ac_date_required'] = date.today().isoformat()
             insert_ac_in_db(nc_id, payload)
             st.success(f"AC {ac_code} creata con successo per la NC {selected_nc}.")
-            trigger_email_prompt(nc_id, f"Nuova AC {ac_code} creata", default_to=str(vals_new.get('ac_email_address','')))
+            # trigger_email_prompt(nc_id, f"Nuova AC {ac_code} creata", default_to=str(vals_new.get('ac_email_address','')))
+    st.markdown('---')
+    render_email_box(
+        context_key=f"nc_{nc_id}",
+        nc_id=str(nc_id),
+        operation="Aggiornamento NC",
+        default_to=str(_get_any(row.to_dict(), "email_address", "EMAIL_ADDRESS", "owner", "OWNER", default=""))
+    )
 
 def view_inserisci_nc(df_nc: pd.DataFrame):
     st.header('➕ Inserisci nuova NC')
@@ -1895,7 +2004,8 @@ def view_inserisci_nc(df_nc: pd.DataFrame):
         payload['nonconformance_number'] = nc_number
         nc_id = insert_nc_in_db(payload)
         st.success(f"NC {nc_number} creata con successo.")
-        trigger_email_prompt(nc_id, 'Nuova NC creata', default_to=str(vals.get('email_address','')))
+        st.markdown('---')
+        render_email_box(context_key=f"create_nc_{nc_id}", nc_id=str(nc_id), operation='Nuova NC creata', default_to=str(vals.get('email_address','')))
 
 # =========================
 # Trend NC Quality (SERVICE) - pandas + plotly
@@ -2047,32 +2157,79 @@ def view_trend_nc_quality_db(df_nc: pd.DataFrame):
     st.caption("Dati dal Google Sheet NC. Asse X settimanale (ultimi 2 anni). Legenda cliccabile per isolare serie.")
 
     fig1 = _plot_flow(flow_df)
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig1, width="stretch")
 
     fig2 = _plot_stock(stock_long)
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width="stretch")
 
 # ============================================================
 # MAIN
 # ============================================================
 
 def main():
-    st.set_page_config(page_title='Gestione Non Conformità (v19-fixed6)', layout='wide')
+    st.set_page_config(page_title='Gestione Non Conformità', layout='wide')
+
+    # Sidebar
     st.sidebar.title('Menu')
-    scelta = st.sidebar.radio('Seleziona funzione', ('1) Lista NC/AC','2) Consulta NC','3) Modifica NC/AC','4) Inserisci NC','5) Trend NC Quality','6) Gestione piattaforme'))
+
+    # Reload button (force fresh read from backend)
+    if st.sidebar.button("🔄 Reload", help="Forza la rilettura dell'elenco NC/AC dal backend"):
+        _refresh_data_and_rerun()
+
+    scelta = st.sidebar.radio(
+        'Seleziona funzione',
+        ('1) Lista NC/AC','2) Consulta NC','3) Modifica NC/AC','4) Inserisci NC','5) Trend NC Quality','6) Gestione piattaforme')
+    )
     st.caption('Backend: Google Sheets (Apps Script)')
 
+    # Dynamic loading indicator + load time
     import time
-    t0 = time.perf_counter(); st.info('⏳ Carico dati dal backend…')
+    t0 = time.perf_counter()
     try:
-        df_nc = load_nc_data(); df_ac = load_ac_data()
+        with st.spinner("Caricamento dati dal backend..."):
+            df_nc = load_nc_data()
+            df_ac = load_ac_data()
     except Exception as e:
-        st.error('Errore caricamento dati dal backend'); st.exception(e); st.stop()
+        st.error('Errore caricamento dati dal backend')
+        st.exception(e)
+        st.stop()
     finally:
-        dt = time.perf_counter() - t0; st.sidebar.write(f"⏱️ Load time: {dt:.2f}s")
+        dt = time.perf_counter() - t0
+        st.sidebar.caption(f"⏱️ Load time: {dt:.2f}s")
 
-    with st.sidebar.expander('🧭 Healthcheck', expanded=True):
-        st.write('DATA URL:', DATA_SCRIPT_URL); st.write('MAIL URL:', MAIL_SCRIPT_URL or '(= DATA URL)')
-        st.write('NC rows:', 0 if df_nc is None else len(df_nc)); st.write('AC rows:', 0 if df_ac is None else len(df_ac))
-        if df_nc is not None and not df_nc.empty: st.write('NC cols:', list(df_nc.columns)[:15], '...' if len(df_nc.columns)>15 else '')
-        if df_ac is not None and not df_ac.empty: st.write('AC cols:', list(df_ac.columns)[:15], '...' if len(df_ac.columns)>15 else '')
+    # Se AC vuoto ma NC contiene campi duplicati, separa
+    if df_ac.empty:
+        df_nc, df_ac_from_nc = _split_combined_nc_ac(df_nc)
+        if not df_ac_from_nc.empty:
+            df_ac = df_ac_from_nc
+
+    if not df_nc.empty and 'id' in df_nc.columns:
+        df_nc = df_nc.drop_duplicates(subset=['id']).copy()
+
+    # Defensive schema alignment (prevents KeyError if backend headers drift)
+    df_nc = standardize_nc_df(df_nc)
+    df_ac = standardize_ac_df(df_ac)
+
+    if scelta.startswith('1'):
+        view_lista(df_nc, df_ac)
+    elif scelta.startswith('2'):
+        view_consulta_nc(df_nc, df_ac)
+    elif scelta.startswith('3'):
+        view_modifica_nc(df_nc, df_ac)
+    elif scelta.startswith('4'):
+        view_inserisci_nc(df_nc)
+    elif scelta.startswith('5'):
+        view_trend_nc_quality_db(df_nc)
+    elif scelta.startswith('6'):
+        view_gestione_piattaforme()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        try: st.set_page_config(page_title='NC Management (v19-fixed6)', layout='wide')
+        except Exception: pass
+        st.error("L'app si è interrotta con un errore. Copia/incolla questo stacktrace in chat.")
+
+        st.exception(e)
